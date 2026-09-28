@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180" viewBox="0 0 720 180" role="img" aria-labelledby="title desc">
+  <title id="title">Verity</title>
+  <desc id="desc">A green checkmark inside a source document mark, followed by the Verity wordmark.</desc>
+  <rect width="720" height="180" rx="28" fill="#0d1f1b"/>
+  <path d="M54 36h62l26 26v82H54z" fill="#d9f99d"/>
+  <path d="M116 36v30h30" fill="none" stroke="#0d1f1b" stroke-width="10" stroke-linejoin="round"/>
+  <path d="m72 104 16 16 33-38" fill="none" stroke="#0d1f1b" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="180" y="103" fill="#f7fee7" font-family="Arial, Helvetica, sans-serif" font-size="72" font-weight="700" letter-spacing="-2">Verity</text>
+  <text x="184" y="136" fill="#a7c7bd" font-family="Arial, Helvetica, sans-serif" font-size="20" letter-spacing="3">SOURCE-GROUNDED EVALUATION</text>
+</svg>
