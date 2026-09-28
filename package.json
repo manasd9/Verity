@@ -16,6 +16,7 @@
     "livekit-client": "^2.22.3",
     "mammoth": "^1.12.3",
     "multer": "^2.4.0",
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.63.0"
   }
 }

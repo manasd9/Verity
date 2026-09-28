@@ -1,29 +1,30 @@
 # Forgeflow state
 
 ## Initiative
-- Name: Evaluation gap diagnosis
+- Name: Website knowledge-base evaluation
 - Mode: Balanced
-- Current stage: implementation complete
+- Current stage: implementation plan written; pending review
 - Execution mode: sequential
-- Recommended model: Sol medium for planning and implementation
+- Recommended model: strong reasoning for planning; strong Node.js coding for implementation
 
 ## Artifacts
-- Idea brief: docs/forgeflow/briefs/2026-09-24-gap-diagnosis-brief.md (approved)
-- Spec: docs/forgeflow/specs/2026-09-24-gap-diagnosis-spec.md (approved)
-- Implementation plan: docs/forgeflow/plans/gap-diagnosis.md (approved)
-- Tasks: implemented directly from the approved plan
-- Review: docs/forgeflow/reviews/gap-diagnosis.md
+- Idea brief: docs/forgeflow/briefs/2026-09-28-website-knowledge-base-evaluation-brief.md (approved)
+- Spec: docs/forgeflow/specs/2026-09-28-website-knowledge-base-evaluation-spec.md (written; pending review)
+- Implementation plan: docs/forgeflow/plans/website-knowledge-base-evaluation.md (written; pending review)
+- Tasks: pending
+- Review: pending
 
 ## Decisions
-- Diagnose observable answer-versus-rubric failures only; do not claim knowledge of FlexAgent internals.
-- Generate one structured diagnosis within the existing control-model scoring request.
-- Show diagnoses only for GAP results, with a trace-unavailable disclaimer for manual and FlexAgent paths.
+- Public website URL source with manual, immutable crawl snapshots.
+- Use existing Customer chat, dataset, evaluation, and local vector storage paths.
+- Keep document behavior intact; defer external-agent integration.
+- Limit each crawl to 100 successful pages with additional request/time bounds.
 
 ## Current task
-- Reference: docs/forgeflow/plans/gap-diagnosis.md
-- Status: complete
-- Tests run: `node --check server.js`, `node --check app.js`, `npm test` (green)
+- Reference: docs/forgeflow/plans/website-knowledge-base-evaluation.md
+- Status: not started
+- Tests run: not applicable (specification only)
 
 ## Next approval
-- Pending stage: none
-- Confirmation asked: no
+- Pending stage: to-tickets
+- Confirmation asked: no; plan review pending

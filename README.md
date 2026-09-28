@@ -49,12 +49,14 @@ OpenAI-compatible model endpoint.
 
 ```bash
 npm install
+npx playwright install chromium
 npm start
 ```
 
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then use **Settings** to
 configure a customer-facing target model and a control model. Upload a source
-document, generate and approve a dataset, and run an evaluation.
+document or crawl a public website, generate and approve a dataset, and run an
+evaluation. The browser installation is required only for website sources.
 
 Run the local regression checks with:
 

@@ -5,6 +5,7 @@ const express = require('express');
 const multer = require('multer');
 const mammoth = require('mammoth');
 const { PDFParse } = require('pdf-parse');
+const { crawlWebsite, normalizeWebsiteUrl } = require('./website-crawler');
 const DEFAULT_TARGET_PROMPT = 'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.';
 
 const root = __dirname;
@@ -27,7 +28,7 @@ const key = Buffer.from(process.env.APP_ENCRYPTION_KEY, 'hex');
 if (key.length !== 32) throw new Error('APP_ENCRYPTION_KEY must be 64 hexadecimal characters.');
 
 function readStore() {
-  const empty = { documents: [], technicalDocuments: [], chunks: [], chatChunks: [], connections: [], datasets: [], evaluations: [], chats: [], agentConfigs: [] };
+  const empty = { documents: [], technicalDocuments: [], websites: [], websiteSnapshots: [], chunks: [], chatChunks: [], connections: [], datasets: [], evaluations: [], chats: [], agentConfigs: [] };
   if (!fs.existsSync(storePath)) return empty;
   const store = { ...empty, ...JSON.parse(fs.readFileSync(storePath, 'utf8')) };
   store.documents = store.documents.map(document => ({ ...document, kind: 'policy' }));
@@ -77,13 +78,14 @@ function decrypt(secret) {
 }
 function publicConnection(connection) { const { secret, ...safe } = connection; return safe; }
 function publicDocument(document, chunks = []) { const { text, ...safe } = document; return { ...safe, retrieval: { status: chunks.some(item => item.documentId === document.id) ? 'ready' : 'unavailable' } }; }
+function publicWebsiteSnapshot(snapshot, chunks = []) { const { pages, ...safe } = snapshot; return { ...safe, pages: (pages || []).map(({ text, ...page }) => page), retrieval: { status: chunks.some(chunk => chunk.documentId === snapshot.id) ? 'ready' : 'unavailable' } }; }
 function agentPrompt(store, documentId, connection) { return store.agentConfigs.find(item => item.documentId === documentId && item.connectionId === connection.id)?.systemPrompt || connection.systemPrompt || DEFAULT_TARGET_PROMPT; }
 function hasSourceEvidence(source, evidence) { const excerpt = String(evidence || '').replace(/\s+/g, ' ').trim(); return Boolean(excerpt) && String(source || '').replace(/\s+/g, ' ').includes(excerpt); }
 function sourceIndexedCases(raw, sources) {
   const cases = JSON.parse(raw).cases;
   if (!Array.isArray(cases)) throw new Error('The control model did not return a scenario list. Please try again.');
   return cases.filter(item => Number.isInteger(Number(item.sourceIndex)) && Number(item.sourceIndex) > 0 && Number(item.sourceIndex) <= sources.length)
-    .map(item => normalizeDatasetCase({ ...item, sourceEvidence: sources[Number(item.sourceIndex) - 1].text }));
+    .map(item => normalizeDatasetCase({ ...item, sourceEvidence: sources[Number(item.sourceIndex) - 1].text, ...(sources[Number(item.sourceIndex) - 1].sourceUrl ? { sourceUrl: sources[Number(item.sourceIndex) - 1].sourceUrl } : {}) }));
 }
 function normalizeDatasetCase(item) {
   const text = value => String(value || '').trim();
@@ -96,7 +98,7 @@ function normalizeDatasetCase(item) {
   });
   if (item.expectedFinalMemory !== undefined && !Array.isArray(item.expectedFinalMemory)) throw new Error('Expected final memory must be an array.');
   const expectedFinalMemory = (item.expectedFinalMemory || []).map(text).filter(Boolean);
-  const normalized = { question: text(item.question), expectedAnswer: text(item.expectedAnswer), requiredPoints: points(item.requiredPoints), forbiddenPoints: points(item.forbiddenPoints), sourceEvidence: text(item.sourceEvidence), turns, expectedFinalMemory };
+  const normalized = { question: text(item.question), expectedAnswer: text(item.expectedAnswer), requiredPoints: points(item.requiredPoints), forbiddenPoints: points(item.forbiddenPoints), sourceEvidence: text(item.sourceEvidence), ...(text(item.sourceUrl) ? { sourceUrl: text(item.sourceUrl) } : {}), turns, expectedFinalMemory };
   if (!turns.length && (!normalized.question || !normalized.expectedAnswer || !normalized.sourceEvidence)) throw new Error('Each single-turn scenario needs a question, expected answer, and policy evidence.');
   return normalized;
 }
@@ -248,6 +250,12 @@ function chunkTechnicalText(text, size = 1400, overlap = 180) {
   }
   return chunks.map((text, index) => ({ index, start: 0, end: text.length, text }));
 }
+function chunkWebsiteText(text, size = 4096, overlap = 180) {
+  const sections = text.split(/(?=^#{1,6}\s+)/m).map(section => section.trim()).filter(Boolean);
+  const chunks = [];
+  for (const section of sections.length ? sections : [text]) chunks.push(...(section.length <= size ? [section] : chunkText(section, size, overlap).map(chunk => chunk.text)));
+  return chunks.map((chunk, index) => ({ index, start: 0, end: chunk.length, text: chunk, heading: (chunk.match(/^#{1,6}\s+(.+)/m) || [])[1] || '' }));
+}
 function cosineSimilarity(a, b) {
   let dot = 0; let aLength = 0; let bLength = 0;
   for (let index = 0; index < a.length && index < b.length; index += 1) { dot += a[index] * b[index]; aLength += a[index] ** 2; bLength += b[index] ** 2; }
@@ -275,10 +283,30 @@ function targetChatMessages(prompt, policyChunks, chat, historyChunks) {
 function technicalTargetMessages(prompt, chunks, question) {
   return [{ role: 'system', content: `${prompt}\n\nAnswer only from the retrieved technical sections. If the document does not support the answer, say so clearly.\n\nRETRIEVED TECHNICAL SECTIONS:\n${policyContext(chunks)}` }, { role: 'user', content: question }];
 }
+function websiteTargetMessages(prompt, chunks, question) {
+  const evidence = chunks.map((chunk, index) => `[Website section ${index + 1}]\nURL: ${chunk.sourceUrl}\n${chunk.heading ? `Section: ${chunk.heading}\n` : ''}${chunk.text}`).join('\n\n');
+  return [{ role: 'system', content: `${prompt}\n\nAnswer only from the retrieved website sections. If they do not support the answer, say so clearly.\n\nRETRIEVED WEBSITE SECTIONS:\n${evidence}` }, { role: 'user', content: question }];
+}
 function resolveDocument(store, documentId) {
   const policy = store.documents.find(item => item.id === documentId);
   if (policy) return policy;
-  return store.technicalDocuments.find(item => item.id === documentId);
+  const technical = store.technicalDocuments.find(item => item.id === documentId);
+  if (technical) return technical;
+  const snapshot = store.websiteSnapshots.find(item => item.id === documentId && ['complete', 'incomplete'].includes(item.status));
+  return snapshot && { ...snapshot, kind: 'website', name: snapshot.name || new URL(snapshot.rootUrl).hostname, characters: snapshot.pages.reduce((total, page) => total + (page.text || '').length, 0) };
+}
+function sourcePassages(source) {
+  if (source.kind === 'website') return source.pages.flatMap(page => chunkText(page.text, 500, 0).map(chunk => ({ ...chunk, sourceUrl: page.url })));
+  return chunkText(source.text, 500, 0);
+}
+function validateWebsiteCases(source, cases) {
+  if (source.kind !== 'website') return cases;
+  return cases.map(item => {
+    if (!item.sourceUrl) throw new Error('Every website scenario needs a source page URL.');
+    const page = source.pages.find(value => value.url === item.sourceUrl);
+    if (!page || !hasSourceEvidence(page.text, item.sourceEvidence)) throw new Error('Website evidence must be an exact excerpt from its saved source page.');
+    return item;
+  });
 }
 function removeDocumentData(store, documentId) {
   const document = store.documents.find(item => item.id === documentId);
@@ -336,7 +364,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 app.use(express.json({ limit: '1mb' }));
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')));
 app.use(express.static(root));
-app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), connections: store.connections.map(publicConnection), datasets: store.datasets, evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
+app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), datasets: store.datasets, evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
 app.post('/api/connections', (req, res) => {
   const { name, role, baseUrl, model, apiKey } = req.body;
   if (![name, role, baseUrl, model, apiKey].every(Boolean) || !['target', 'control'].includes(role)) return res.status(400).json({ error: 'Name, role, base URL, model, and API key are required.' });
@@ -447,12 +475,50 @@ app.delete('/api/technical-documents/:id', (req, res) => {
   if (!removeTechnicalDocumentData(store, req.params.id)) return res.status(404).json({ error: 'Technical document not found.' });
   saveStore(store); res.status(204).end();
 });
+async function createWebsiteSnapshot(control, website, rootUrl) {
+  if (!control) throw new Error('Connect an OpenAI control model before crawling a website.');
+  const crawl = await crawlWebsite(rootUrl);
+  if (!crawl.pages.length) throw new Error(`No usable website pages were collected.${crawl.failed[0]?.reason ? ` ${crawl.failed[0].reason}` : ''}`);
+  const snapshot = { id: id('site_snapshot'), websiteId: website.id, kind: 'website', name: new URL(crawl.rootUrl).hostname, rootUrl: crawl.rootUrl, status: crawl.incomplete ? 'incomplete' : 'complete', limit: crawl.limit || undefined, crawledAt: crawl.crawledAt, createdAt: new Date().toISOString(), pages: crawl.pages, skipped: crawl.skipped, failed: crawl.failed };
+  const chunks = crawl.pages.flatMap(page => chunkWebsiteText(page.text).map(chunk => ({ id: id('chunk'), documentId: snapshot.id, documentKind: 'website', websiteId: website.id, snapshotId: snapshot.id, pageId: page.id, sourceUrl: page.url, sourceTitle: page.title, ...chunk, vector: null, createdAt: snapshot.createdAt })));
+  const vectors = await embedAll(control, chunks.map(chunk => chunk.text));
+  if (vectors.length !== chunks.length) throw new Error('Website indexing did not complete.');
+  chunks.forEach((chunk, index) => { chunk.vector = vectors[index]; });
+  return { snapshot, chunks };
+}
+// A crawl can take minutes, so the store is re-read just before saving to keep changes made by other requests meanwhile.
+app.post('/api/websites', async (req, res, next) => {
+  try {
+    const rootUrl = normalizeWebsiteUrl(req.body.url).href;
+    const website = { id: id('site'), rootUrl, createdAt: new Date().toISOString() };
+    const { snapshot, chunks } = await createWebsiteSnapshot(openAIControlConnection(readStore()), website, rootUrl);
+    const store = readStore(); store.websites.push(website); store.websiteSnapshots.push(snapshot); store.chunks.push(...chunks);
+    saveStore(store); res.status(201).json(publicWebsiteSnapshot(snapshot, store.chunks));
+  } catch (error) { next(error); }
+});
+app.post('/api/websites/:id/recrawl', async (req, res, next) => {
+  try {
+    const initial = readStore(); const website = initial.websites.find(item => item.id === req.params.id);
+    if (!website) throw new Error('Website source not found.');
+    const { snapshot, chunks } = await createWebsiteSnapshot(openAIControlConnection(initial), website, website.rootUrl);
+    const store = readStore(); if (!store.websites.some(item => item.id === website.id)) throw new Error('Website source not found.');
+    store.websiteSnapshots.push(snapshot); store.chunks.push(...chunks);
+    saveStore(store); res.status(201).json(publicWebsiteSnapshot(snapshot, store.chunks));
+  } catch (error) { next(error); }
+});
+app.get('/api/website-snapshots/:snapshotId/pages/:pageId', (req, res) => {
+  const snapshot = readStore().websiteSnapshots.find(item => item.id === req.params.snapshotId);
+  const page = snapshot?.pages.find(item => item.id === req.params.pageId);
+  if (!page) return res.status(404).json({ error: 'Website page not found.' });
+  res.json(page);
+});
 app.post('/api/chat', async (req, res, next) => {
   try {
     const { documentId, connectionId, question, chatId } = req.body;
     const store = readStore(); const document = resolveDocument(store, documentId); const connection = store.connections.find(item => item.id === connectionId && item.role === 'target'); const control = openAIControlConnection(store);
     if (!document || !connection || !question) throw new Error('A document, target connection, and question are required.');
     if (document.kind === 'technical' && connection.kind === 'flexagent') throw new Error('Technical document chat requires a model target that can receive retrieved source sections.');
+    if (document.kind === 'website' && connection.kind === 'flexagent') throw new Error('Website chat requires a local model target that can receive retrieved source sections.');
     if (!control) throw new Error('An OpenAI control-model connection is required for retrieval.');
     if (document.kind === 'technical') await ensureTechnicalIndexed(store, document, control);
     const questionVector = (await embed(control, [question.trim()]))[0];
@@ -460,10 +526,10 @@ app.post('/api/chat', async (req, res, next) => {
     if (!retrieved.length) throw new Error('This document has not been indexed for retrieval. Re-upload it after connecting OpenAI.');
     let chat = chatId && store.chats.find(item => item.id === chatId);
     if (chat && (chat.documentId !== documentId || chat.connectionId !== connectionId)) throw new Error('This conversation belongs to a different document or agent.');
-    if (!chat) chat = { id: id('chat'), documentId, documentKind: document.kind, connectionId, title: question.trim().slice(0, 58), messages: [], surveyMemory: { version: 1, facts: [] }, createdAt: new Date().toISOString() };
+    if (!chat) chat = { id: id('chat'), documentId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), connectionId, title: question.trim().slice(0, 58), messages: [], surveyMemory: { version: 1, facts: [] }, createdAt: new Date().toISOString() };
     chat = appendChatMessage(chat, 'user', question);
     const history = document.kind === 'policy' ? retrieveChatChunks(store.chatChunks, chat.id, questionVector) : [];
-    const answer = await callModel(connection, document.kind === 'technical' ? technicalTargetMessages(agentPrompt(store, documentId, connection), retrieved, question) : targetChatMessages(agentPrompt(store, documentId, connection), retrieved, chat, history));
+    const answer = await callModel(connection, document.kind === 'technical' ? technicalTargetMessages(agentPrompt(store, documentId, connection), retrieved, question) : document.kind === 'website' ? websiteTargetMessages(agentPrompt(store, documentId, connection), retrieved, question) : targetChatMessages(agentPrompt(store, documentId, connection), retrieved, chat, history));
     chat = appendChatMessage(chat, 'assistant', answer); chat.updatedAt = new Date().toISOString();
     if (document.kind === 'policy') {
       const answerVector = (await embed(control, [answer]))[0];
@@ -478,14 +544,14 @@ app.post('/api/datasets/generate', async (req, res, next) => {
   try {
     const { documentId, connectionId, count = 10 } = req.body; const store = readStore(); const document = resolveDocument(store, documentId); const connection = store.connections.find(item => item.id === connectionId && item.role === 'control');
     if (!document || !connection) throw new Error('A document and control-model connection are required.');
-    const technical = document.kind === 'technical';
-    const caseType = technical ? 'technical-document evaluation cases' : 'customer-facing policy evaluation cases';
-    const sources = chunkText(document.text, 500, 0);
-    const prompt = `Create ${Math.min(Math.max(Number(count), 1), 30)} ${caseType} from the numbered source passages below. Return JSON only: {"cases":[{"question":"","expectedAnswer":"","requiredPoints":[""],"forbiddenPoints":[""],"sourceIndex":1}]}. For every case, sourceIndex must be the number of the passage that supports its expected answer. ${technical ? 'Ask about documented APIs, inputs, outputs, branches, constraints, or unsupported details; expected answers must not invent facts.' : 'Questions must be realistic customer messages and expected answers must be direct customer-ready replies.'}\n\n${sources.map((source, index) => `SOURCE ${index + 1}:\n${source.text}`).join('\n\n')}`;
+    const technical = document.kind === 'technical'; const website = document.kind === 'website';
+    const caseType = website ? 'website knowledge-base evaluation cases' : technical ? 'technical-document evaluation cases' : 'customer-facing policy evaluation cases';
+    const sources = website ? sourcePassages(document).slice(0, 120) : sourcePassages(document);
+    const prompt = `Create ${Math.min(Math.max(Number(count), 1), 30)} ${caseType} from the numbered source passages below. Return JSON only: {"cases":[{"question":"","expectedAnswer":"","requiredPoints":[""],"forbiddenPoints":[""],"sourceIndex":1}]}. For every case, sourceIndex must be the number of the passage that supports its expected answer. ${website ? 'Questions must be realistic customer questions and expected answers must be direct, source-supported replies.' : technical ? 'Ask about documented APIs, inputs, outputs, branches, constraints, or unsupported details; expected answers must not invent facts.' : 'Questions must be realistic customer messages and expected answers must be direct customer-ready replies.'}\n\n${sources.map((source, index) => `SOURCE ${index + 1}${source.sourceUrl ? ` (${source.sourceUrl})` : ''}:\n${source.text}`).join('\n\n')}`;
     const raw = await callModel(connection, [{ role: 'system', content: 'You create precise, source-grounded datasets for testing agents.' }, { role: 'user', content: prompt }], true);
-    const cases = sourceIndexedCases(raw, sources);
+    const cases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!cases.length) throw new Error('The control model did not cite any valid source passages. Please try again.');
-    const dataset = { id: id('dataset'), documentId, documentKind: document.kind, status: 'draft', cases, createdAt: new Date().toISOString() };
+    const dataset = { id: id('dataset'), documentId, documentKind: document.kind, ...(website ? { snapshotId: document.id } : {}), status: 'draft', cases, createdAt: new Date().toISOString() };
     store.datasets.push(dataset); saveStore(store); res.status(201).json(dataset);
   } catch (error) { next(error); }
 });
@@ -494,7 +560,8 @@ app.put('/api/datasets/:id', (req, res) => {
   if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
   if (dataset.status === 'approved') return res.status(400).json({ error: 'Approved datasets cannot be changed.' });
   if (!Array.isArray(req.body.cases) || !req.body.cases.length) return res.status(400).json({ error: 'At least one scenario is required.' });
-  dataset.cases = req.body.cases.map(normalizeDatasetCase);
+  const source = resolveDocument(store, dataset.documentId); if (!source) return res.status(400).json({ error: 'The source for this dataset is unavailable.' });
+  dataset.cases = validateWebsiteCases(source, req.body.cases.map(normalizeDatasetCase));
   dataset.updatedAt = new Date().toISOString(); saveStore(store); res.json(dataset);
 });
 app.post('/api/datasets/:id/approve', (req, res) => {
@@ -512,6 +579,7 @@ app.post('/api/evaluations', async (req, res, next) => {
     const document = dataset && resolveDocument(store, dataset.documentId);
     if (!dataset || !target || !control || !document) throw new Error('An approved dataset, its document, target agent, and control model are required.');
     if (document.kind === 'technical' && target.kind === 'flexagent') throw new Error('Technical document evaluation requires a model target that can receive retrieved source sections.');
+    if (document.kind === 'website' && target.kind === 'flexagent') throw new Error('Website evaluation requires a local model target that can receive retrieved source sections.');
     if (document.kind === 'technical') {
       const retrievalConnection = openAIControlConnection(store);
       if (!retrievalConnection) throw new Error('An OpenAI control-model connection is required for retrieval.');
@@ -521,7 +589,7 @@ app.post('/api/evaluations', async (req, res, next) => {
     for (const item of dataset.cases) {
       const flexAgent = target.kind === 'flexagent';
       if (item.turns?.length) {
-        if (document.kind === 'technical') throw new Error('Technical document evaluations use single-turn source-grounded scenarios.');
+        if (['technical', 'website'].includes(document.kind)) throw new Error('This source uses single-turn source-grounded scenarios.');
         if (flexAgent) throw new Error('Multi-turn evaluations require a local model target.');
         const retrievalConnection = openAIControlConnection(store);
         if (!retrievalConnection) throw new Error('An OpenAI control-model connection is required for retrieval.');
@@ -556,11 +624,11 @@ app.post('/api/evaluations', async (req, res, next) => {
         if (!retrievalConnection) throw new Error('An OpenAI control-model connection is required for retrieval.');
         retrieved = retrieveChunks(store.chunks, document.id, (await embed(retrievalConnection, [item.question]))[0], 5, document.kind);
         if (!retrieved.length) throw new Error('This document has not been indexed for retrieval. Re-upload it after connecting OpenAI.');
-        answer = await callModel(target, document.kind === 'technical' ? technicalTargetMessages(agentPrompt(store, document.id, target), retrieved, item.question) : [{ role: 'system', content: `${agentPrompt(store, document.id, target)}\n\nRETRIEVED POLICY SECTIONS:\n${policyContext(retrieved)}` }, { role: 'user', content: item.question }]);
+        answer = await callModel(target, document.kind === 'technical' ? technicalTargetMessages(agentPrompt(store, document.id, target), retrieved, item.question) : document.kind === 'website' ? websiteTargetMessages(agentPrompt(store, document.id, target), retrieved, item.question) : [{ role: 'system', content: `${agentPrompt(store, document.id, target)}\n\nRETRIEVED POLICY SECTIONS:\n${policyContext(retrieved)}` }, { role: 'user', content: item.question }]);
       }
       const verdict = await scoreAnswer(control, answer, item); results.push({ case: item, answer, retrievedChunks: retrieved.map(({ vector, ...chunk }) => chunk), retrievalUnavailable: flexAgent, ...verdict });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, targetConnectionId, controlConnectionId, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), targetConnectionId, controlConnectionId, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
     store.evaluations.unshift(evaluation); saveStore(store); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
@@ -588,6 +656,7 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
     const target = store.connections.find(item => item.id === targetConnectionId && item.kind === 'flexagent-livekit');
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !target || !control) throw new Error('An approved dataset, LiveKit FlexAgent target, and control model are required.');
+    if (resolveDocument(store, dataset.documentId)?.kind === 'website') throw new Error('Website evaluations currently run through the local target model only.');
     if (dataset.cases.some(item => item.turns?.length)) throw new Error('LiveKit widget evaluation currently supports single-turn scenarios only.');
     if (!Array.isArray(answers) || answers.length !== dataset.cases.length || answers.some(answer => !String(answer || '').trim())) throw new Error('LiveKit must return one non-empty answer for every scenario.');
     const results = [];
@@ -601,4 +670,4 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
 });
 app.use((error, req, res, next) => { console.error(error); res.status(400).json({ error: error.message || 'Request failed.' }); });
 if (require.main === module) app.listen(Number(process.env.PORT || 4173), () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { chunkText, chunkTechnicalText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, normalizeDatasetCase, sourceIndexedCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest };
+module.exports = { chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest };
