@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Policy evaluation workspace" />
+    <title>Verity | Evaluation workspace</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="primary-navigation" aria-expanded="true" aria-label="Hide navigation" title="Hide navigation">☰</button>
+      <aside id="primary-navigation" class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="#home" data-page="home" aria-label="Verity home">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>verity</span>
+        </a>
+        <div class="workspace-switcher">
+          <span class="workspace-kicker">WORKSPACE</span>
+          <button class="workspace-button" type="button">Your workspace <span>⌄</span></button>
+        </div>
+        <nav class="nav-links">
+          <a href="#home" class="nav-link" data-page="home"><span class="nav-glyph">⌂</span>Home</a>
+          <a href="#documents" class="nav-link" data-page="documents"><span class="nav-glyph">□</span>Documents</a>
+          <a href="#technical" class="nav-link" data-page="technical"><span class="nav-glyph">⌘</span>Technical Blueprint</a>
+          <a href="#datasets" class="nav-link" data-page="datasets"><span class="nav-glyph">◇</span>Golden datasets</a>
+          <a href="#evaluation" class="nav-link active" data-page="evaluation"><span class="nav-glyph">◷</span>Evaluation</a>
+          <a href="#results" class="nav-link" data-page="results"><span class="nav-glyph">▤</span>Results</a>
+          <a href="#chat" class="nav-link" data-page="chat"><span class="nav-glyph">◌</span>Customer chat</a>
+          <a href="#settings" class="nav-link" data-page="settings"><span class="nav-glyph">·</span>Settings</a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="user-card"><span class="avatar">YO</span><span><strong>Your account</strong><small>Workflow admin</small></span><button type="button" aria-label="Open profile menu">•••</button></div>
+        </div>
+      </aside>
+      <main id="app" class="main-content" tabindex="-1"></main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/vendor/livekit-client.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
