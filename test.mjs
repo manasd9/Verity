@@ -58,7 +58,7 @@ assert.match(js, /file-drop"><label for="file-input">Upload document/);
 assert.match(js, /Golden datasets/);
 assert.match(js, /Welcome to Verity/);
 assert.match(js, /Upload a source document/);
-assert.match(js, /Four steps from source document to evidence/);
+assert.match(js, /Five steps from source document to evidence/);
 assert.match(js, /const pages = \{ home, evaluation/);
 assert.match(html, /data-page="home"/);
 assert.ok(html.indexOf('data-page="datasets"') < html.indexOf('data-page="evaluation"'));
