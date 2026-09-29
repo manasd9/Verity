@@ -6,6 +6,7 @@ const multer = require('multer');
 const mammoth = require('mammoth');
 const { PDFParse } = require('pdf-parse');
 const { crawlWebsite, normalizeWebsiteUrl } = require('./website-crawler');
+const { assertPublicHttpsUrl, safeFetch } = require('./outbound');
 const DEFAULT_TARGET_PROMPT = 'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.';
 
 const root = __dirname;
@@ -38,7 +39,24 @@ function readStore() {
   store.evaluations = store.evaluations.map(evaluation => ({ ...evaluation, results: evaluation.results.map(result => result.pass ? result : { ...result, gapDiagnosis: result.turns ? multiTurnGapDiagnosis(result.turns, result.memoryVerdict || { pass: true, missing: [] }) : gapDiagnosisForVerdict(result, result.case) }) }));
   return store;
 }
-function saveStore(store) { fs.writeFileSync(storePath, JSON.stringify(store, null, 2)); }
+function sleepSync(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds); }
+// Writes to a temporary file, flushes it, then renames it over store.json, so a crash never leaves a half-written store.
+function saveStore(store) {
+  const temporaryPath = `${storePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    const descriptor = fs.openSync(temporaryPath, 'w');
+    try { fs.writeSync(descriptor, JSON.stringify(store, null, 2)); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    for (let attempt = 0; ; attempt += 1) {
+      try { fs.renameSync(temporaryPath, storePath); break; } catch (error) {
+        if (attempt >= 5 || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
+        sleepSync(20 * (attempt + 1));
+      }
+    }
+  } catch (error) {
+    try { fs.unlinkSync(temporaryPath); } catch {}
+    throw error;
+  }
+}
 function id(prefix) { return `${prefix}_${crypto.randomUUID()}`; }
 function normalizeChat(chat) {
   const messages = (chat.messages || []).map((message, index) => ({
@@ -86,7 +104,7 @@ function flexAgentBaseUrl(value) {
   let url;
   try { url = new URL(value); } catch { throw new Error('FlexAgent API URL must be a valid HTTPS URL.'); }
   if (url.protocol !== 'https:') throw new Error('FlexAgent API URL must use HTTPS.');
-  return url.toString().replace(/\/$/, '');
+  return assertPublicHttpsUrl(url.href, 'FlexAgent API URL').toString().replace(/\/$/, '');
 }
 function flexAgentOrigin(value) {
   try {
@@ -187,7 +205,7 @@ async function extractText(file) {
 }
 async function callModel(connection, messages, json = false) {
   const base = connection.baseUrl.replace(/\/$/, '');
-  const response = await fetch(`${base}/chat/completions`, {
+  const response = await safeFetch(`${base}/chat/completions`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(connection.secret)}` },
     body: JSON.stringify({ model: connection.model, messages, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
   });
@@ -245,7 +263,7 @@ async function listFlexAgentAgents(store) {
   const session = store.flexAgentSession;
   if (!session?.accessToken) throw new Error('Connect FlexAgent before loading agents.');
   if (!validObjectId(session.orgId)) throw new Error('Choose an organization before loading agents.');
-  const response = await fetch(`${session.baseUrl}/v1/agent/list`, {
+  const response = await safeFetch(`${session.baseUrl}/v1/agent/list`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(session.accessToken)}` },
     body: JSON.stringify({ pagination: { page: 1, limit: 100 }, orgId: session.orgId })
@@ -265,7 +283,7 @@ async function listFlexAgentAgents(store) {
 async function listFlexAgentOrganizations(store) {
   const session = store.flexAgentSession;
   if (!session?.accessToken) throw new Error('Connect FlexAgent before loading organizations.');
-  const response = await fetch(`${session.baseUrl}/v1/org/list`, {
+  const response = await safeFetch(`${session.baseUrl}/v1/org/list`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(session.accessToken)}` },
     body: JSON.stringify({ pagination: { page: 1, limit: 100 } })
@@ -284,7 +302,7 @@ async function listFlexAgentOrganizations(store) {
 }
 async function callFlexAgent(target, question) {
   const request = flexAgentRequest(target, question);
-  const response = await fetch(request.url, {
+  const response = await safeFetch(request.url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(target.secret)}` },
     body: JSON.stringify(request.body)
@@ -418,7 +436,7 @@ function removeWebsiteData(store, websiteId) {
 }
 function openAIControlConnection(store) { return store.connections.find(item => item.role === 'control' && new URL(item.baseUrl).hostname === 'api.openai.com'); }
 async function embed(connection, input) {
-  const response = await fetch(`${connection.baseUrl.replace(/\/$/, '')}/embeddings`, {
+  const response = await safeFetch(`${connection.baseUrl.replace(/\/$/, '')}/embeddings`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(connection.secret)}` },
     body: JSON.stringify({ model: 'text-embedding-3-small', input }),
   });
@@ -470,15 +488,14 @@ app.get('/api/state', (req, res) => { const store = readStore(); res.json({ docu
 app.post('/api/connections', (req, res) => {
   const { name, role, baseUrl, model, apiKey } = req.body;
   if (![name, role, baseUrl, model, apiKey].every(Boolean) || !['target', 'control'].includes(role)) return res.status(400).json({ error: 'Name, role, base URL, model, and API key are required.' });
-  let url; try { url = new URL(baseUrl); } catch { return res.status(400).json({ error: 'Base URL must be a valid URL.' }); }
+  let url; try { url = assertPublicHttpsUrl(baseUrl, 'Base URL'); } catch (error) { return res.status(400).json({ error: error.message }); }
   const store = readStore(); const connection = { id: id('conn'), name, role, baseUrl: url.toString().replace(/\/$/, ''), model, createdAt: new Date().toISOString(), secret: encrypt(apiKey) };
   store.connections.push(connection); saveStore(store); res.status(201).json(publicConnection(connection));
 });
 app.post('/api/flexagent-target', (req, res) => {
   const { name = 'FlexAgent target', baseUrl, serviceToken, orgId, agentId, mode = 'api', parentOrigin } = req.body;
   if (!['api', 'livekit'].includes(mode) || ![baseUrl, orgId, agentId].every(value => typeof value === 'string' && value.trim()) || (mode === 'api' && (!serviceToken || !serviceToken.trim()))) return res.status(400).json({ error: 'FlexAgent URL, organization ID, agent ID, and an evaluation service token for API mode are required.' });
-  let url; try { url = new URL(baseUrl); } catch { return res.status(400).json({ error: 'FlexAgent URL must be a valid URL.' }); }
-  if (!['http:', 'https:'].includes(url.protocol)) return res.status(400).json({ error: 'FlexAgent URL must use HTTP or HTTPS.' });
+  let url; try { url = assertPublicHttpsUrl(baseUrl, 'FlexAgent URL'); } catch (error) { return res.status(400).json({ error: error.message }); }
   let origin;
   if (mode === 'livekit') { try { origin = new URL(parentOrigin).origin; } catch { return res.status(400).json({ error: 'LiveKit widget mode needs the exact allowed Eval Tool origin, such as http://127.0.0.1:4173.' }); } }
   const store = readStore(); const connection = { id: id('conn'), name: name.trim() || 'FlexAgent target', role: 'target', kind: mode === 'livekit' ? 'flexagent-livekit' : 'flexagent', baseUrl: url.toString().replace(/\/$/, ''), model: mode === 'livekit' ? 'FlexAgent via LiveKit' : 'FlexAgent', orgId: orgId.trim(), agentId: agentId.trim(), ...(origin ? { parentOrigin: origin } : {}), createdAt: new Date().toISOString(), ...(mode === 'api' ? { secret: encrypt(serviceToken.trim()) } : {}) };
@@ -489,7 +506,7 @@ app.post('/api/flexagent/login', async (req, res, next) => {
     const { baseUrl, email, password, parentOrigin } = req.body;
     if (![email, password].every(value => typeof value === 'string' && value.trim())) throw new Error('FlexAgent email and password are required.');
     const normalizedBaseUrl = flexAgentBaseUrl(baseUrl);
-    const response = await fetch(`${normalizedBaseUrl}/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email.trim(), password }) });
+    const response = await safeFetch(`${normalizedBaseUrl}/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email.trim(), password }) });
     if (!response.ok) throw new Error('FlexAgent login failed. Check your email and password.');
     const body = await response.json();
     if (typeof body.accessToken !== 'string' || !body.accessToken) throw new Error('FlexAgent returned an invalid login response.');
@@ -552,7 +569,7 @@ app.post('/api/flexagent-livekit-token', async (req, res, next) => {
     if (!store.flexAgentSession?.orgName || store.flexAgentSession.targetConnectionId !== target.id) throw new Error('Choose an organization and FlexAgent before starting a LiveKit evaluation.');
     if (req.get('origin') && req.get('origin') !== target.parentOrigin) throw new Error('This Eval Tool origin does not match the configured LiveKit widget origin.');
     const request = flexAgentWidgetTokenRequest(target);
-    const response = await fetch(request.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request.body) });
+    const response = await safeFetch(request.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request.body) });
     if (!response.ok) throw new Error(`FlexAgent LiveKit token request failed (${response.status}).`);
     const body = await response.json();
     if (typeof body.token !== 'string' || typeof body.wsUrl !== 'string') throw new Error('FlexAgent returned an invalid LiveKit token response.');
@@ -563,7 +580,7 @@ app.post('/api/openai-setup', (req, res) => {
   const { apiKey, targetModel, controlModel } = req.body;
   if (![apiKey, targetModel, controlModel].every(Boolean)) return res.status(400).json({ error: 'OpenAI API key, target model, and control model are required.' });
   Promise.all([...new Set([targetModel, controlModel])].map(async model => {
-    const response = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const response = await safeFetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
     if (!response.ok) throw new Error(`OpenAI could not verify model “${model}”. Check the model name and API key.`);
   })).then(() => {
     const store = readStore();
@@ -869,4 +886,4 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
 });
 app.use((error, req, res, next) => { if (error.status) res.status(error.status); else res.status(400); res.json({ error: error.message || 'Request failed.' }); });
 if (require.main === module) app.listen(Number(process.env.PORT || 4173), '127.0.0.1', () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { app, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest };
+module.exports = { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest };

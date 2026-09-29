@@ -17,6 +17,7 @@
     "mammoth": "^1.12.3",
     "multer": "^2.4.0",
     "pdf-parse": "^2.4.5",
-    "playwright": "^1.63.0"
+    "playwright": "^1.63.0",
+    "undici": "7.30.0"
   }
 }

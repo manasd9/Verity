@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,7 @@ const testDataDir = mkdtempSync(path.join(tmpdir(), 'eval-tool-test-'));
 process.env.EVAL_TOOL_DATA_DIR = testDataDir;
 process.env.APP_ENCRYPTION_KEY = 'a'.repeat(64);
 const require = createRequire(import.meta.url);
-const { app, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest } = require('./server.js');
+const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest } = require('./server.js');
 const { normalizeWebsiteUrl, isPublicAddress, isInScope, robotsAllows, browserExecutablePath } = require('./website-crawler.js');
 
 const html = readFileSync('index.html', 'utf8');
@@ -310,6 +310,105 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   }
   assert.deepEqual(unescaped, [], 'Unescaped values in HTML templates');
 }
+
+// Outbound endpoint validation: public HTTPS only, resolved addresses checked, redirects re-validated.
+{
+  const { assertPublicHttpsUrl, createGuardedLookup, safeFetch, MAX_REDIRECTS } = require('./outbound.js');
+  for (const bad of ['http://api.openai.com/v1', 'https://user:secret@api.openai.com/v1', 'https://localhost/v1', 'https://model.localhost/v1', 'https://127.0.0.1/v1', 'https://2130706433/', 'https://0x7f.1/', 'https://10.0.0.5/', 'https://192.168.1.10/', 'https://172.16.0.1/', 'https://169.254.169.254/latest/meta-data', 'https://[::1]/', 'https://[::ffff:7f00:1]/', 'https://[fd00::1]/', 'ftp://example.com/', 'file:///etc/passwd', 'not a url', '']) assert.throws(() => assertPublicHttpsUrl(bad), /HTTPS/, bad);
+  for (const good of ['https://api.openai.com/v1', 'https://api-staging.flexagents.ai', 'https://8.8.8.8/v1']) assert.equal(assertPublicHttpsUrl(good).protocol, 'https:');
+
+  const lookupResult = addresses => (hostname, options, callback) => { assert.equal(options.all, true); callback(null, addresses); };
+  const run = (lookup, options) => new Promise(resolve => createGuardedLookup(lookup)('example.test', options, (error, ...rest) => resolve({ error, rest })));
+  assert.match((await run(lookupResult([{ address: '127.0.0.1', family: 4 }]), {})).error.message, /private or unsafe/);
+  assert.match((await run(lookupResult([{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.7', family: 4 }]), { all: true })).error.message, /private or unsafe/);
+  assert.match((await run(lookupResult([{ address: '::1', family: 6 }]), { all: true })).error.message, /private or unsafe/);
+  assert.match((await run(lookupResult([]), {})).error.message, /private or unsafe/);
+  assert.deepEqual((await run(lookupResult([{ address: '93.184.216.34', family: 4 }]), {})).rest, ['93.184.216.34', 4]);
+  assert.deepEqual((await run(lookupResult([{ address: '93.184.216.34', family: 4 }]), { all: true })).rest, [[{ address: '93.184.216.34', family: 4 }]]);
+  assert.equal((await run((hostname, options, callback) => callback(new Error('ENOTFOUND')), {})).error.message, 'ENOTFOUND');
+
+  const savedFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    const script = responses => { calls.length = 0; globalThis.fetch = async (url, init) => { calls.push({ url, init }); return responses.shift(); }; };
+    const redirect = (status, location) => new Response(null, { status, headers: { location } });
+    const payload = { method: 'POST', headers: { Authorization: 'Bearer secret', 'Content-Type': 'application/json' }, body: '{"a":1}' };
+
+    script([new Response('ok')]);
+    assert.equal(await (await safeFetch('https://api.example/v1/x', payload)).text(), 'ok');
+    assert.equal(calls[0].init.redirect, 'manual');
+    assert.equal(typeof calls[0].init.dispatcher.dispatch, 'function');
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer secret');
+
+    script([new Response('never')]);
+    for (const url of ['http://api.example/', 'https://127.0.0.1/', 'https://169.254.169.254/', 'https://internal.localhost/']) await assert.rejects(() => safeFetch(url, payload), /HTTPS/);
+    assert.equal(calls.length, 0);
+
+    for (const target of ['http://api.example/next', 'https://127.0.0.1/admin', 'https://[::1]/', 'https://169.254.169.254/latest/meta-data', 'https://user:pw@api.example/', 'https://service.localhost/', '//10.0.0.1/']) {
+      script([redirect(302, target), new Response('leaked')]);
+      await assert.rejects(() => safeFetch('https://api.example/v1/x', payload), /HTTPS|redirect/i, target);
+      assert.equal(calls.length, 1, `must not follow ${target}`);
+    }
+
+    script([redirect(307, '/v1/moved'), new Response('done')]);
+    assert.equal(await (await safeFetch('https://api.example/v1/x', payload)).text(), 'done');
+    assert.equal(calls[1].url, 'https://api.example/v1/moved');
+    assert.equal(calls[1].init.method, 'POST');
+    assert.equal(calls[1].init.body, '{"a":1}');
+    assert.equal(calls[1].init.headers.authorization, 'Bearer secret');
+
+    script([redirect(302, 'https://other.example/landing'), new Response('done')]);
+    await safeFetch('https://api.example/v1/x', payload);
+    assert.equal(calls[1].url, 'https://other.example/landing');
+    assert.equal(calls[1].init.method, 'GET');
+    assert.equal(calls[1].init.body, undefined);
+    assert.equal(calls[1].init.headers.authorization, undefined);
+    assert.equal(calls[1].init.headers['content-type'], undefined);
+
+    script([redirect(307, 'https://other.example/keep'), new Response('done')]);
+    await safeFetch('https://api.example/v1/x', payload);
+    assert.equal(calls[1].init.headers.authorization, undefined, 'Authorization must not follow a cross-origin redirect');
+
+    script(Array.from({ length: MAX_REDIRECTS + 2 }, (_, index) => redirect(302, `/hop-${index}`)));
+    await assert.rejects(() => safeFetch('https://api.example/v1/x', payload), /redirected too many times/);
+    assert.equal(calls.length, MAX_REDIRECTS + 1);
+  } finally { globalThis.fetch = savedFetch; }
+
+  assert.doesNotMatch(server, /await fetch\(/, 'server requests must go through safeFetch');
+  assert.match(readFileSync('.gitignore', 'utf8'), /^\.idea\/$/m);
+}
+
+// Atomic store writes: a failed write must leave the previous store intact and no temporary file behind.
+{
+  const original = fs.existsSync(storePath) ? readFileSync(storePath, 'utf8') : null;
+  const tempFiles = () => readdirSync(path.dirname(storePath)).filter(name => name.endsWith('.tmp'));
+  const realRename = fs.renameSync; const realWrite = fs.writeSync;
+  try {
+    saveStore({ marker: 'first' });
+    assert.deepEqual(JSON.parse(readFileSync(storePath, 'utf8')), { marker: 'first' });
+    assert.deepEqual(tempFiles(), []);
+
+    fs.renameSync = () => { throw Object.assign(new Error('rename failed'), { code: 'EIO' }); };
+    assert.throws(() => saveStore({ marker: 'second' }), /rename failed/);
+    fs.renameSync = realRename;
+    assert.deepEqual(JSON.parse(readFileSync(storePath, 'utf8')), { marker: 'first' });
+    assert.deepEqual(tempFiles(), []);
+
+    fs.writeSync = (descriptor, data) => { realWrite(descriptor, String(data).slice(0, 5)); throw new Error('disk full'); };
+    assert.throws(() => saveStore({ marker: 'third' }), /disk full/);
+    fs.writeSync = realWrite;
+    assert.deepEqual(JSON.parse(readFileSync(storePath, 'utf8')), { marker: 'first' });
+    assert.deepEqual(tempFiles(), []);
+
+    let renameAttempts = 0;
+    fs.renameSync = (from, to) => { renameAttempts += 1; if (renameAttempts <= 2) throw Object.assign(new Error('locked'), { code: 'EPERM' }); return realRename(from, to); };
+    saveStore({ marker: 'fourth' });
+    fs.renameSync = realRename;
+    assert.equal(renameAttempts, 3);
+    assert.deepEqual(JSON.parse(readFileSync(storePath, 'utf8')), { marker: 'fourth' });
+    assert.deepEqual(tempFiles(), []);
+  } finally { fs.renameSync = realRename; fs.writeSync = realWrite; if (original === null) fs.rmSync(storePath, { force: true }); else writeFileSync(storePath, original); }
+}
 const listener = createServer(app);
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const originalFetch = globalThis.fetch;
@@ -425,6 +524,22 @@ try {
       assert.equal(allowed.status, 400, `Origin ${origin}`);
       assert.match(allowed.body, /Choose an uploaded policy document/);
     }
+  }
+
+  // Configured endpoints must be public HTTPS; nothing is saved when they are not.
+  {
+    const connectionsBefore = JSON.parse((await rawRequest(listener, { path: '/api/state' })).body).connections;
+    for (const baseUrl of ['http://mock-model.example', 'https://127.0.0.1:8080', 'https://localhost', 'https://10.1.2.3/v1', 'https://169.254.169.254', 'https://user:pass@mock-model.example', 'https://[::1]/v1']) {
+      const model = await rawRequest(listener, { method: 'POST', path: '/api/connections', body: { name: 'Bad', role: 'control', baseUrl, model: 'm', apiKey: 'k' } });
+      assert.equal(model.status, 400, baseUrl);
+      assert.match(model.body, /public HTTPS URL|valid HTTPS URL/);
+      const flex = await rawRequest(listener, { method: 'POST', path: '/api/flexagent-target', body: { baseUrl, orgId: '65f000000000000000000001', agentId: '65f000000000000000000002', mode: 'api', serviceToken: 't' } });
+      assert.equal(flex.status, 400, baseUrl);
+      const login = await rawRequest(listener, { method: 'POST', path: '/api/flexagent/login', body: { baseUrl, email: 'a@b.co', password: 'p' } });
+      assert.equal(login.status, 400, baseUrl);
+    }
+    const connectionsAfter = JSON.parse((await rawRequest(listener, { path: '/api/state' })).body).connections;
+    assert.deepEqual(connectionsAfter, connectionsBefore);
   }
 } finally {
   globalThis.fetch = originalFetch;
