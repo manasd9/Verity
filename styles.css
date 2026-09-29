@@ -191,3 +191,14 @@ a { color: inherit; text-decoration: none; }
 .review-actions .review-footer { border-top: 0; margin-top: 0; padding-top: 0; }
 .review-actions #review-status { margin: 8px 0 0; }
 @media (max-width: 900px) { .review-layout { grid-template-columns: 1fr; }.review-list { position: static; max-height: none; }.review-list-scroll { max-height: 220px; } }
+/* Evaluation: manual scoring folded into a single backup row (presentation only) */
+.manual-backup { margin-top: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); overflow: hidden; }
+.manual-backup > summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; }
+.manual-backup > summary::-webkit-details-marker { display: none; }
+.manual-backup > summary strong, .manual-backup > summary small { display: block; }
+.manual-backup > summary strong { font-size: 13px; }
+.manual-backup > summary small { margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.manual-backup > summary:focus-visible { outline: 3px solid #f0b7a9; outline-offset: -3px; }
+.manual-backup[open] > summary .manual-open i { transform: rotate(90deg); }
+.manual-backup-list .manual-evaluation summary { padding: 13px 20px; }
+.manual-backup-list .manual-evaluation-form { padding: 2px 20px 20px; }

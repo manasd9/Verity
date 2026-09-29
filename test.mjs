@@ -134,7 +134,7 @@ assert.match(js, /Save & approve/);
 assert.match(js, /Viewing evaluation/);
 assert.match(js, /Target answer/);
 assert.match(js, /Score pasted agent answers/);
-assert.match(js, /MANUAL FLEXAGENT TEST/);
+assert.match(js, /<details class="manual-backup">/);
 assert.match(js, /runManualEvaluation/);
 assert.match(js, /no retrieval trace was captured/);
 assert.match(js, /Download report/);
