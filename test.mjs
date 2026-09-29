@@ -132,7 +132,7 @@ assert.match(js, /Remove scenario/);
 assert.match(js, /Go to evaluation/);
 assert.match(js, /Save & approve/);
 assert.match(js, /Viewing evaluation/);
-assert.match(js, /Target answer/);
+assert.match(js, /Tested agent’s answer/);
 assert.match(js, /Score pasted agent answers/);
 assert.match(js, /<details class="manual-backup">/);
 assert.match(js, /runManualEvaluation/);
