@@ -444,8 +444,25 @@ async function ensureTechnicalIndexed(store, document, control) {
 }
 function policyContext(chunks) { return chunks.map((item, index) => `[Policy section ${index + 1}]\n${item.text}`).join('\n\n'); }
 
+const LOCAL_HOST = /^(127\.0\.0\.1|localhost)(:\d{1,5})?$/i;
+const LOCAL_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d{1,5})?$/i;
+// Blocks DNS rebinding (foreign Host) and cross-site writes (foreign Origin). Requests without an Origin, such as curl or tests, are allowed.
+function localRequestGuard(req, res, next) {
+  const host = req.headers.host || '';
+  const hostMatch = LOCAL_HOST.exec(host);
+  if (!hostMatch) return res.status(403).json({ error: 'Requests must use http://127.0.0.1 or http://localhost.' });
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = req.headers.origin;
+  const originMatch = origin === undefined ? null : LOCAL_ORIGIN.exec(origin);
+  const foreignOrigin = origin !== undefined && (!originMatch || (originMatch[2] || '') !== (hostMatch[2] || ''));
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (foreignOrigin || (fetchSite !== undefined && !['same-origin', 'none'].includes(fetchSite))) return res.status(403).json({ error: 'Cross-site requests are not allowed.' });
+  next();
+}
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+app.use(localRequestGuard);
 app.use(express.json({ limit: '1mb' }));
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')));
 for (const [route, file] of [['/', 'index.html'], ['/index.html', 'index.html'], ['/app.js', 'app.js'], ['/styles.css', 'styles.css'], ['/verity-logo.svg', 'verity-logo.svg']]) app.get(route, (req, res) => res.sendFile(path.join(root, file)));

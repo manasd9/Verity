@@ -25,6 +25,15 @@ function requestApp(listener, method, url, body) {
     request.on('error', reject); if (body) request.write(JSON.stringify(body)); request.end();
   });
 }
+function rawRequest(listener, { method = 'GET', path: url = '/', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const request = httpRequest({ host: '127.0.0.1', port: listener.address().port, method, path: url, headers: { ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}), ...headers } }, response => {
+      let text = ''; response.setEncoding('utf8'); response.on('data', chunk => { text += chunk; }); response.on('end', () => resolve({ status: response.statusCode, body: text }));
+    });
+    request.on('error', reject); request.end(payload);
+  });
+}
 function requestDocument(listener, fields = {}, route = '/api/documents') {
   const boundary = 'eval-tool-test-boundary';
   const parts = [...Object.entries(fields).map(([name, value]) => `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`), `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="policy.txt"\r\nContent-Type: text/plain\r\n\r\nRiders can request a transit trip plan.\r\n`, `--${boundary}--\r\n`].join('');
@@ -271,6 +280,36 @@ const combinedDiagnosis = multiTurnGapDiagnosis([{ ...gapVerdict, turn: rubric }
 assert.deepEqual(combinedDiagnosis.categories, ['Likely retrieval miss', 'Conversation memory gap']);
 assert.match(combinedDiagnosis.why, /3 of 3.*1 expected conversation detail/);
 assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }), undefined);
+
+// Browser-side HTML escaping (app.js runs in the browser, so evaluate just its helpers).
+{
+  const start = js.indexOf('const HTML_ESCAPES'); const end = js.indexOf('\n', js.indexOf('function sourceLink'));
+  const { escapeHtml, safeHttpUrl, sourceLink } = new Function(`${js.slice(start, end)}; return { escapeHtml, safeHttpUrl, sourceLink };`)();
+  const hostile = `<img src=x onerror=alert(1)>" onmouseover="alert(2)' data-x='&`;
+  const escaped = escapeHtml(hostile);
+  assert.doesNotMatch(escaped, /[<>"']/);
+  assert.equal(escaped, '&lt;img src=x onerror=alert(1)&gt;&quot; onmouseover=&quot;alert(2)&#39; data-x=&#39;&amp;');
+  assert.equal(`<option value="${escapeHtml('" autofocus onfocus="alert(1)')}">x</option>`, '<option value="&quot; autofocus onfocus=&quot;alert(1)">x</option>');
+  assert.equal(escapeHtml(undefined), ''); assert.equal(escapeHtml(null), ''); assert.equal(escapeHtml(42), '42');
+  for (const unsafe of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'data:text/html,<script>alert(1)</script>', 'vbscript:x', '//evil.example', 'not a url', '']) assert.equal(safeHttpUrl(unsafe), '', unsafe);
+  assert.equal(safeHttpUrl('https://example.com/a?b=1'), 'https://example.com/a?b=1');
+  assert.doesNotMatch(sourceLink('javascript:alert(1)'), /<a /);
+  assert.equal(sourceLink('javascript:alert(1)'), 'javascript:alert(1)');
+  const link = sourceLink('https://example.com/?q="><script>', ' rel="noreferrer"');
+  assert.match(link, /^<a href="https:\/\/example\.com\/\?q=%22%3E%3Cscript%3E" rel="noreferrer">/);
+  assert.doesNotMatch(link, /<script>/);
+  // Regression guard: text-like values must not reach an HTML template unescaped. Toasts, confirms, and status messages are plain text or escaped where rendered.
+  const textLike = /\.(name|title|model|type|answer|rationale|question|message|sourceUrl|rootUrl|orgName|agentName|missing)\b|^name$/;
+  const plainTextContexts = [/escapeHtml\(`$/, /toast\(`$/, /confirm\(`[^`]*"$/, /message: `[^`]*$/, /=== 'ready' \? `$/, /is ready to explore\.` : `$/, /= item => `$/, /'website' \? `$/, /\(Website snapshot\)` : `$/];
+  const unescaped = [];
+  for (const match of js.matchAll(/\$\{([^{}`]*)\}/g)) {
+    const expression = match[1].trim();
+    if (/^(escapeHtml|sourceLink)\(/.test(expression) || /^(?:[^(]*\? )?(escapeHtml|sourceLink)\(/.test(expression) || /^step\./.test(expression) || !textLike.test(expression)) continue;
+    const before = js.slice(Math.max(0, match.index - 90), match.index).replace(/\s+/g, ' ');
+    if (!plainTextContexts.some(pattern => pattern.test(before))) unescaped.push(`${expression} after "${before.slice(-40)}"`);
+  }
+  assert.deepEqual(unescaped, [], 'Unescaped values in HTML templates');
+}
 const listener = createServer(app);
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const originalFetch = globalThis.fetch;
@@ -354,6 +393,39 @@ try {
   const expiredState = await requestApp(listener, 'GET', '/api/state');
   assert.equal(expiredState.body.flexAgentSession.connected, false);
   assert.equal(expiredState.body.flexAgentSession.selectedAgentName, 'Another Agent');
+
+  // Host validation (DNS rebinding) and Origin validation (cross-site writes).
+  {
+    const port = listener.address().port;
+    const beforeState = JSON.parse((await rawRequest(listener, { path: '/api/state' })).body);
+    for (const host of ['evil.example', `evil.example:${port}`, '127.0.0.1.evil.example', `localhost.evil.example:${port}`, `evil.example@127.0.0.1:${port}`, `127.0.0.1:${port}@evil.example`, '[::1]', '0.0.0.0']) {
+      const rejected = await rawRequest(listener, { path: '/api/state', headers: { Host: host } });
+      assert.equal(rejected.status, 403, `Host ${host}`);
+      assert.doesNotMatch(rejected.body, /documents|connections/);
+    }
+    assert.equal((await rawRequest(listener, { path: '/', headers: { Host: 'evil.example' } })).status, 403);
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `LOCALHOST:${port}`]) assert.equal((await rawRequest(listener, { path: '/api/state', headers: { Host: host } })).status, 200, host);
+    const attack = { name: 'Injected', role: 'control', baseUrl: 'https://attacker.example/v1', model: 'm', apiKey: 'sk-attack' };
+    for (const origin of ['https://evil.example', 'http://evil.example', 'null', `http://127.0.0.1.evil.example:${port}`, `http://localhost.evil.example:${port}`, 'http://127.0.0.1:9', 'http://localhost:9', `https://127.0.0.1:${port}`, `http://127.0.0.1:${port}/`]) {
+      const rejected = await rawRequest(listener, { method: 'POST', path: '/api/connections', headers: { Origin: origin }, body: attack });
+      assert.equal(rejected.status, 403, `Origin ${origin}`);
+    }
+    assert.equal((await rawRequest(listener, { method: 'POST', path: '/api/connections', headers: { 'Sec-Fetch-Site': 'cross-site' }, body: attack })).status, 403);
+    assert.equal((await rawRequest(listener, { method: 'POST', path: '/api/connections', headers: { 'Sec-Fetch-Site': 'same-site' }, body: attack })).status, 403);
+    assert.equal((await rawRequest(listener, { method: 'PUT', path: '/api/agent-configs', headers: { Origin: 'https://evil.example' }, body: {} })).status, 403);
+    assert.equal((await rawRequest(listener, { method: 'DELETE', path: `/api/documents/${scopedDocument.body.id}`, headers: { Origin: 'https://evil.example' } })).status, 403);
+    assert.equal((await rawRequest(listener, { method: 'POST', path: '/api/documents', headers: { Origin: 'https://evil.example', 'Content-Type': 'multipart/form-data; boundary=x' } })).status, 403);
+    const afterState = JSON.parse((await rawRequest(listener, { path: '/api/state' })).body);
+    assert.deepEqual(afterState.connections, beforeState.connections);
+    assert.deepEqual(afterState.documents, beforeState.documents);
+    // Normal local browser and tool usage keeps working.
+    for (const origin of [`http://127.0.0.1:${port}`, `http://localhost:${port}`, undefined]) {
+      const headers = origin ? { Origin: origin, 'Sec-Fetch-Site': 'same-origin', Host: origin.slice('http://'.length) } : {};
+      const allowed = await rawRequest(listener, { method: 'PUT', path: '/api/agent-configs', headers, body: {} });
+      assert.equal(allowed.status, 400, `Origin ${origin}`);
+      assert.match(allowed.body, /Choose an uploaded policy document/);
+    }
+  }
 } finally {
   globalThis.fetch = originalFetch;
   await new Promise(resolve => listener.close(resolve));
