@@ -28,3 +28,16 @@
 ## Next approval
 - Pending stage: to-tickets
 - Confirmation asked: no; plan review pending
+
+## Concurrent workflow
+- Name: FlexAgent login and agent picker
+- Mode: Balanced
+- Current stage: implementation complete; review passed
+- Spec: docs/forgeflow/specs/2026-09-28-flexagent-login-agent-picker-spec.md
+- Implementation plan: docs/forgeflow/plans/flexagent-login-agent-picker.md (approved)
+- Tasks: docs/forgeflow/tasks/flexagent-login-agent-picker/
+- Decision: server-side FlexAgent login; encrypted access token retained across restarts; agent names loaded with `agent:list`; selected agent uses the existing RAG-only LiveKit widget path.
+- Current task: all FlexAgent login and agent picker tasks complete
+- Tests: `npm test`, `node --check server.js`, `node --check app.js` passed.
+- Review: docs/forgeflow/reviews/flexagent-login-agent-picker.md (passed)
+- Next approval: none; user authorized continuous implementation.

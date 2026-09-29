@@ -9,7 +9,7 @@ const { crawlWebsite, normalizeWebsiteUrl } = require('./website-crawler');
 const DEFAULT_TARGET_PROMPT = 'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.';
 
 const root = __dirname;
-const dataDir = path.join(root, 'data');
+const dataDir = process.env.EVAL_TOOL_DATA_DIR || path.join(root, 'data');
 const storePath = path.join(dataDir, 'store.json');
 const envPath = path.join(root, '.env');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
@@ -28,7 +28,7 @@ const key = Buffer.from(process.env.APP_ENCRYPTION_KEY, 'hex');
 if (key.length !== 32) throw new Error('APP_ENCRYPTION_KEY must be 64 hexadecimal characters.');
 
 function readStore() {
-  const empty = { documents: [], technicalDocuments: [], websites: [], websiteSnapshots: [], chunks: [], chatChunks: [], connections: [], datasets: [], evaluations: [], chats: [], agentConfigs: [] };
+  const empty = { documents: [], technicalDocuments: [], websites: [], websiteSnapshots: [], chunks: [], chatChunks: [], connections: [], datasets: [], evaluations: [], chats: [], agentConfigs: [], flexAgentSession: null };
   if (!fs.existsSync(storePath)) return empty;
   const store = { ...empty, ...JSON.parse(fs.readFileSync(storePath, 'utf8')) };
   store.documents = store.documents.map(document => ({ ...document, kind: 'policy' }));
@@ -77,6 +77,33 @@ function decrypt(secret) {
   return Buffer.concat([decipher.update(Buffer.from(secret.tag, 'base64')), decipher.final()]).toString('utf8');
 }
 function publicConnection(connection) { const { secret, ...safe } = connection; return safe; }
+function publicFlexAgentSession(session) {
+  if (!session) return null;
+  const { accessToken, ...safe } = session;
+  return { ...safe, connected: Boolean(accessToken) };
+}
+function flexAgentBaseUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error('FlexAgent API URL must be a valid HTTPS URL.'); }
+  if (url.protocol !== 'https:') throw new Error('FlexAgent API URL must use HTTPS.');
+  return url.toString().replace(/\/$/, '');
+}
+function flexAgentOrigin(value) {
+  try {
+    const url = new URL(value || 'http://127.0.0.1:4173');
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
+    return url.origin;
+  } catch { throw new Error('Eval Tool origin must be a valid HTTP or HTTPS URL.'); }
+}
+function validObjectId(value) { return /^[a-f\d]{24}$/i.test(String(value || '')); }
+function recordScope(record) { return record?.orgId && record?.agentId ? { orgId: record.orgId, agentId: record.agentId } : null; }
+function sameScope(a, b) { const left = recordScope(a); const right = recordScope(b); return left?.orgId === right?.orgId && left?.agentId === right?.agentId; }
+function requestedScope(store, input) {
+  if (!input?.orgId && !input?.agentId) return {};
+  const session = store.flexAgentSession;
+  if (!session?.accessToken || !validObjectId(input.orgId) || !validObjectId(input.agentId) || session.orgId !== input.orgId || session.selectedAgentId !== input.agentId) throw new Error('Choose the FlexAgent organization and agent before adding this source.');
+  return { orgId: session.orgId, orgName: session.orgName, agentId: session.selectedAgentId, agentName: session.selectedAgentName };
+}
 function publicDocument(document, chunks = []) { const { text, ...safe } = document; return { ...safe, retrieval: { status: chunks.some(item => item.documentId === document.id) ? 'ready' : 'unavailable' } }; }
 function publicWebsiteSnapshot(snapshot, chunks = []) { const { pages, ...safe } = snapshot; return { ...safe, pages: (pages || []).map(({ text, ...page }) => page), retrieval: { status: chunks.some(chunk => chunk.documentId === snapshot.id) ? 'ready' : 'unavailable' } }; }
 function agentPrompt(store, documentId, connection) { return store.agentConfigs.find(item => item.documentId === documentId && item.connectionId === connection.id)?.systemPrompt || connection.systemPrompt || DEFAULT_TARGET_PROMPT; }
@@ -214,6 +241,47 @@ function flexAgentWidgetTokenRequest(target) {
     body: { orgId: target.orgId, agentId: target.agentId, parentOrigin: target.parentOrigin }
   };
 }
+async function listFlexAgentAgents(store) {
+  const session = store.flexAgentSession;
+  if (!session?.accessToken) throw new Error('Connect FlexAgent before loading agents.');
+  if (!validObjectId(session.orgId)) throw new Error('Choose an organization before loading agents.');
+  const response = await fetch(`${session.baseUrl}/v1/agent/list`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(session.accessToken)}` },
+    body: JSON.stringify({ pagination: { page: 1, limit: 100 }, orgId: session.orgId })
+  });
+  if (response.status === 401 || response.status === 403) {
+    delete session.accessToken;
+    saveStore(store);
+    const error = new Error('FlexAgent connection expired. Reconnect to load agents.');
+    error.status = 401;
+    throw error;
+  }
+  if (!response.ok) throw new Error(`FlexAgent agent list failed (${response.status}).`);
+  const body = await response.json();
+  if (!Array.isArray(body.agents)) throw new Error('FlexAgent returned an invalid agent list.');
+  return body.agents.filter(agent => validObjectId(agent?.id) && String(agent.name || '').trim()).map(agent => ({ id: agent.id, name: String(agent.name).trim() }));
+}
+async function listFlexAgentOrganizations(store) {
+  const session = store.flexAgentSession;
+  if (!session?.accessToken) throw new Error('Connect FlexAgent before loading organizations.');
+  const response = await fetch(`${session.baseUrl}/v1/org/list`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(session.accessToken)}` },
+    body: JSON.stringify({ pagination: { page: 1, limit: 100 } })
+  });
+  if (response.status === 401 || response.status === 403) {
+    delete session.accessToken;
+    saveStore(store);
+    const error = new Error('FlexAgent connection expired. Reconnect to load organizations.');
+    error.status = 401;
+    throw error;
+  }
+  if (!response.ok) throw new Error(`FlexAgent organization list failed (${response.status}).`);
+  const body = await response.json();
+  if (!Array.isArray(body.orgs)) throw new Error('FlexAgent returned an invalid organization list.');
+  return body.orgs.filter(org => org?.status === 'active' && validObjectId(org.id) && String(org.name || '').trim()).map(org => ({ id: org.id, name: String(org.name).trim() }));
+}
 async function callFlexAgent(target, question) {
   const request = flexAgentRequest(target, question);
   const response = await fetch(request.url, {
@@ -334,6 +402,20 @@ function removeTechnicalDocumentData(store, documentId) {
   store.agentConfigs = store.agentConfigs.filter(item => item.documentId !== documentId);
   return true;
 }
+function removeWebsiteData(store, websiteId) {
+  if (!store.websites.some(item => item.id === websiteId)) return false;
+  const snapshotIds = new Set(store.websiteSnapshots.filter(item => item.websiteId === websiteId).map(item => item.id));
+  const datasetIds = new Set(store.datasets.filter(item => snapshotIds.has(item.documentId)).map(item => item.id));
+  store.websites = store.websites.filter(item => item.id !== websiteId);
+  store.websiteSnapshots = store.websiteSnapshots.filter(item => item.websiteId !== websiteId);
+  store.chunks = store.chunks.filter(item => !snapshotIds.has(item.documentId));
+  store.datasets = store.datasets.filter(item => !datasetIds.has(item.id));
+  store.evaluations = store.evaluations.filter(item => !datasetIds.has(item.datasetId));
+  store.chats = store.chats.filter(item => !snapshotIds.has(item.documentId));
+  store.chatChunks = (store.chatChunks || []).filter(item => !snapshotIds.has(item.documentId));
+  store.agentConfigs = store.agentConfigs.filter(item => !snapshotIds.has(item.documentId));
+  return true;
+}
 function openAIControlConnection(store) { return store.connections.find(item => item.role === 'control' && new URL(item.baseUrl).hostname === 'api.openai.com'); }
 async function embed(connection, input) {
   const response = await fetch(`${connection.baseUrl.replace(/\/$/, '')}/embeddings`, {
@@ -354,8 +436,11 @@ async function ensureTechnicalIndexed(store, document, control) {
   const chunks = chunkTechnicalText(document.text);
   const vectors = await embedAll(control, chunks.map(chunk => chunk.text));
   if (!chunks.length || vectors.length !== chunks.length) throw new Error('Technical document indexing did not complete. Please try again.');
-  store.chunks.push(...chunks.map((chunk, index) => ({ id: id('chunk'), documentId: document.id, documentKind: 'technical', ...chunk, vector: vectors[index], createdAt: new Date().toISOString() })));
-  saveStore(store);
+  const latest = readStore();
+  if (!latest.technicalDocuments.some(item => item.id === document.id)) throw new Error('Technical document was removed during indexing.');
+  if (!latest.chunks.some(chunk => chunk.documentId === document.id && chunk.documentKind === 'technical')) latest.chunks.push(...chunks.map((chunk, index) => ({ id: id('chunk'), documentId: document.id, documentKind: 'technical', ...chunk, vector: vectors[index], createdAt: new Date().toISOString() })));
+  store.chunks = latest.chunks;
+  saveStore(latest);
 }
 function policyContext(chunks) { return chunks.map((item, index) => `[Policy section ${index + 1}]\n${item.text}`).join('\n\n'); }
 
@@ -363,8 +448,8 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 app.use(express.json({ limit: '1mb' }));
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')));
-app.use(express.static(root));
-app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), datasets: store.datasets, evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
+for (const [route, file] of [['/', 'index.html'], ['/index.html', 'index.html'], ['/app.js', 'app.js'], ['/styles.css', 'styles.css'], ['/verity-logo.svg', 'verity-logo.svg']]) app.get(route, (req, res) => res.sendFile(path.join(root, file)));
+app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), flexAgentSession: publicFlexAgentSession(store.flexAgentSession), datasets: store.datasets, evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
 app.post('/api/connections', (req, res) => {
   const { name, role, baseUrl, model, apiKey } = req.body;
   if (![name, role, baseUrl, model, apiKey].every(Boolean) || !['target', 'control'].includes(role)) return res.status(400).json({ error: 'Name, role, base URL, model, and API key are required.' });
@@ -373,7 +458,7 @@ app.post('/api/connections', (req, res) => {
   store.connections.push(connection); saveStore(store); res.status(201).json(publicConnection(connection));
 });
 app.post('/api/flexagent-target', (req, res) => {
-  const { name = 'FlexAgent target', baseUrl, serviceToken, orgId, agentId, mode = 'api' } = req.body;
+  const { name = 'FlexAgent target', baseUrl, serviceToken, orgId, agentId, mode = 'api', parentOrigin } = req.body;
   if (!['api', 'livekit'].includes(mode) || ![baseUrl, orgId, agentId].every(value => typeof value === 'string' && value.trim()) || (mode === 'api' && (!serviceToken || !serviceToken.trim()))) return res.status(400).json({ error: 'FlexAgent URL, organization ID, agent ID, and an evaluation service token for API mode are required.' });
   let url; try { url = new URL(baseUrl); } catch { return res.status(400).json({ error: 'FlexAgent URL must be a valid URL.' }); }
   if (!['http:', 'https:'].includes(url.protocol)) return res.status(400).json({ error: 'FlexAgent URL must use HTTP or HTTPS.' });
@@ -382,10 +467,72 @@ app.post('/api/flexagent-target', (req, res) => {
   const store = readStore(); const connection = { id: id('conn'), name: name.trim() || 'FlexAgent target', role: 'target', kind: mode === 'livekit' ? 'flexagent-livekit' : 'flexagent', baseUrl: url.toString().replace(/\/$/, ''), model: mode === 'livekit' ? 'FlexAgent via LiveKit' : 'FlexAgent', orgId: orgId.trim(), agentId: agentId.trim(), ...(origin ? { parentOrigin: origin } : {}), createdAt: new Date().toISOString(), ...(mode === 'api' ? { secret: encrypt(serviceToken.trim()) } : {}) };
   store.connections.push(connection); saveStore(store); res.status(201).json(publicConnection(connection));
 });
+app.post('/api/flexagent/login', async (req, res, next) => {
+  try {
+    const { baseUrl, email, password, parentOrigin } = req.body;
+    if (![email, password].every(value => typeof value === 'string' && value.trim())) throw new Error('FlexAgent email and password are required.');
+    const normalizedBaseUrl = flexAgentBaseUrl(baseUrl);
+    const response = await fetch(`${normalizedBaseUrl}/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email.trim(), password }) });
+    if (!response.ok) throw new Error('FlexAgent login failed. Check your email and password.');
+    const body = await response.json();
+    if (typeof body.accessToken !== 'string' || !body.accessToken) throw new Error('FlexAgent returned an invalid login response.');
+    const store = readStore();
+    if (store.flexAgentSession?.targetConnectionId) store.connections = store.connections.filter(connection => connection.id !== store.flexAgentSession.targetConnectionId);
+    store.flexAgentSession = { baseUrl: normalizedBaseUrl, parentOrigin: flexAgentOrigin(parentOrigin), accessToken: encrypt(body.accessToken) };
+    saveStore(store);
+    res.status(201).json({ session: publicFlexAgentSession(store.flexAgentSession) });
+  } catch (error) { next(error); }
+});
+app.post('/api/flexagent/organizations', async (req, res, next) => {
+  try { res.json({ organizations: await listFlexAgentOrganizations(readStore()) }); } catch (error) { next(error); }
+});
+app.post('/api/flexagent/select-organization', async (req, res, next) => {
+  try {
+    const orgId = String(req.body.orgId || '');
+    const store = readStore(); const session = store.flexAgentSession;
+    if (!session || !validObjectId(orgId)) throw new Error('Choose a valid organization.');
+    const organization = (await listFlexAgentOrganizations(store)).find(item => item.id === orgId);
+    if (!organization) throw new Error('That organization is not available to this FlexAgent account.');
+    const changed = session.orgId !== organization.id || !session.orgName;
+    if (changed && session.targetConnectionId) store.connections = store.connections.filter(connection => connection.id !== session.targetConnectionId);
+    store.flexAgentSession = { ...session, orgId: organization.id, orgName: organization.name };
+    if (changed) {
+      delete store.flexAgentSession.selectedAgentId;
+      delete store.flexAgentSession.selectedAgentName;
+      delete store.flexAgentSession.targetConnectionId;
+    }
+    saveStore(store);
+    res.json({ session: publicFlexAgentSession(store.flexAgentSession) });
+  } catch (error) { next(error); }
+});
+app.post('/api/flexagent/agents', async (req, res, next) => {
+  try {
+    const store = readStore();
+    res.json({ agents: await listFlexAgentAgents(store) });
+  } catch (error) { next(error); }
+});
+app.post('/api/flexagent/select-agent', async (req, res, next) => {
+  try {
+    const agentId = String(req.body.agentId || '');
+    const store = readStore(); const session = store.flexAgentSession;
+    if (!session || !validObjectId(agentId)) throw new Error('Choose a valid FlexAgent.');
+    const agent = (await listFlexAgentAgents(store)).find(item => item.id === agentId);
+    if (!agent) throw new Error('That FlexAgent is not available in this organization.');
+    const connection = { id: session.targetConnectionId || id('conn'), name: agent.name, role: 'target', kind: 'flexagent-livekit', baseUrl: session.baseUrl, model: 'FlexAgent via LiveKit', orgId: session.orgId, agentId: agent.id, parentOrigin: session.parentOrigin, createdAt: new Date().toISOString() };
+    const index = store.connections.findIndex(item => item.id === connection.id);
+    if (index >= 0) store.connections[index] = { ...store.connections[index], ...connection, createdAt: store.connections[index].createdAt };
+    else store.connections.push(connection);
+    store.flexAgentSession = { ...session, selectedAgentId: agent.id, selectedAgentName: agent.name, targetConnectionId: connection.id };
+    saveStore(store);
+    res.json({ session: publicFlexAgentSession(store.flexAgentSession), target: publicConnection(connection) });
+  } catch (error) { next(error); }
+});
 app.post('/api/flexagent-livekit-token', async (req, res, next) => {
   try {
-    const target = readStore().connections.find(item => item.id === req.body.targetConnectionId && item.kind === 'flexagent-livekit');
+    const store = readStore();
+    const target = store.connections.find(item => item.id === req.body.targetConnectionId && item.kind === 'flexagent-livekit');
     if (!target) throw new Error('Choose a LiveKit FlexAgent target.');
+    if (!store.flexAgentSession?.orgName || store.flexAgentSession.targetConnectionId !== target.id) throw new Error('Choose an organization and FlexAgent before starting a LiveKit evaluation.');
     if (req.get('origin') && req.get('origin') !== target.parentOrigin) throw new Error('This Eval Tool origin does not match the configured LiveKit widget origin.');
     const request = flexAgentWidgetTokenRequest(target);
     const response = await fetch(request.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request.body) });
@@ -417,6 +564,11 @@ app.delete('/api/connections/:id', (req, res) => {
   const store = readStore(); const before = store.connections.length;
   store.connections = store.connections.filter(connection => connection.id !== req.params.id);
   if (store.connections.length === before) return res.status(404).json({ error: 'Connection not found.' });
+  if (store.flexAgentSession?.targetConnectionId === req.params.id) {
+    delete store.flexAgentSession.targetConnectionId;
+    delete store.flexAgentSession.selectedAgentId;
+    delete store.flexAgentSession.selectedAgentName;
+  }
   saveStore(store); res.status(204).end();
 });
 app.put('/api/connections/:id/prompt', (req, res) => {
@@ -438,26 +590,31 @@ app.post('/api/documents', upload.single('document'), async (req, res, next) => 
   try {
     if (!req.file) throw new Error('Choose a document to upload.');
     const text = (await extractText(req.file)).trim(); if (!text) throw new Error('No readable text was found in this document.');
-    const store = readStore(); const document = { id: id('doc'), name: req.file.originalname, type: path.extname(req.file.originalname).slice(1).toUpperCase(), text, characters: text.length, createdAt: new Date().toISOString() };
-    const control = openAIControlConnection(store);
+    const initialStore = readStore(); const document = { id: id('doc'), name: req.file.originalname, type: path.extname(req.file.originalname).slice(1).toUpperCase(), text, characters: text.length, ...requestedScope(initialStore, req.body), createdAt: new Date().toISOString() };
+    const control = openAIControlConnection(initialStore);
     const chunks = chunkText(text);
+    let indexed = [];
     if (control) {
       const vectors = await embedAll(control, chunks.map(item => item.text));
-      store.chunks.push(...chunks.map((item, index) => ({ id: id('chunk'), documentId: document.id, documentKind: 'policy', ...item, vector: vectors[index], createdAt: document.createdAt })));
+      indexed = chunks.map((item, index) => ({ id: id('chunk'), documentId: document.id, documentKind: 'policy', ...item, vector: vectors[index], createdAt: document.createdAt }));
     }
+    const store = readStore(); store.chunks.push(...indexed);
     store.documents.push(document); saveStore(store); res.status(201).json(publicDocument(document, store.chunks));
   } catch (error) { next(error); }
 });
-app.delete('/api/documents/:id', (req, res) => {
-  const store = readStore();
-  if (!removeDocumentData(store, req.params.id)) return res.status(404).json({ error: 'Document not found.' });
-  saveStore(store); res.status(204).end();
+app.delete('/api/documents/:id', (req, res, next) => {
+  try {
+    const store = readStore(); const document = store.documents.find(item => item.id === req.params.id);
+    if (!document) return res.status(404).json({ error: 'Document not found.' });
+    if (recordScope(document)) requestedScope(store, document);
+    removeDocumentData(store, req.params.id); saveStore(store); res.status(204).end();
+  } catch (error) { next(error); }
 });
 app.post('/api/technical-documents', upload.single('document'), async (req, res, next) => {
   try {
     if (!req.file) throw new Error('Choose a technical document to upload.');
     const text = (await extractText(req.file)).trim(); if (!text) throw new Error('No readable text was found in this document.');
-    const store = readStore(); const document = { id: id('tech'), kind: 'technical', name: req.file.originalname, type: path.extname(req.file.originalname).slice(1).toUpperCase(), text, characters: text.length, createdAt: new Date().toISOString(), analysisStatus: 'unavailable' };
+    const store = readStore(); const document = { id: id('tech'), kind: 'technical', name: req.file.originalname, type: path.extname(req.file.originalname).slice(1).toUpperCase(), text, characters: text.length, ...requestedScope(store, req.body), createdAt: new Date().toISOString(), analysisStatus: 'unavailable' };
     store.technicalDocuments.push(document); saveStore(store);
     const control = openAIControlConnection(store);
     if (control) {
@@ -465,21 +622,27 @@ app.post('/api/technical-documents', upload.single('document'), async (req, res,
         await ensureTechnicalIndexed(store, document, control);
         document.analysis = await analyzeTechnicalDocument(control, text); document.analysisStatus = 'ready';
       } catch (error) { document.analysisStatus = 'unavailable'; document.analysisError = error.message; }
-      saveStore(store);
+      const latest = readStore(); const saved = latest.technicalDocuments.find(item => item.id === document.id);
+      if (!saved) throw new Error('Technical document was removed during analysis.');
+      saved.analysis = document.analysis; saved.analysisStatus = document.analysisStatus; saved.analysisError = document.analysisError;
+      saveStore(latest);
     }
-    res.status(201).json(publicDocument(document, store.chunks));
+    res.status(201).json(publicDocument(document, readStore().chunks));
   } catch (error) { next(error); }
 });
-app.delete('/api/technical-documents/:id', (req, res) => {
-  const store = readStore();
-  if (!removeTechnicalDocumentData(store, req.params.id)) return res.status(404).json({ error: 'Technical document not found.' });
-  saveStore(store); res.status(204).end();
+app.delete('/api/technical-documents/:id', (req, res, next) => {
+  try {
+    const store = readStore(); const document = store.technicalDocuments.find(item => item.id === req.params.id);
+    if (!document) return res.status(404).json({ error: 'Technical document not found.' });
+    if (recordScope(document)) requestedScope(store, document);
+    removeTechnicalDocumentData(store, req.params.id); saveStore(store); res.status(204).end();
+  } catch (error) { next(error); }
 });
 async function createWebsiteSnapshot(control, website, rootUrl) {
   if (!control) throw new Error('Connect an OpenAI control model before crawling a website.');
   const crawl = await crawlWebsite(rootUrl);
   if (!crawl.pages.length) throw new Error(`No usable website pages were collected.${crawl.failed[0]?.reason ? ` ${crawl.failed[0].reason}` : ''}`);
-  const snapshot = { id: id('site_snapshot'), websiteId: website.id, kind: 'website', name: new URL(crawl.rootUrl).hostname, rootUrl: crawl.rootUrl, status: crawl.incomplete ? 'incomplete' : 'complete', limit: crawl.limit || undefined, crawledAt: crawl.crawledAt, createdAt: new Date().toISOString(), pages: crawl.pages, skipped: crawl.skipped, failed: crawl.failed };
+  const snapshot = { id: id('site_snapshot'), websiteId: website.id, kind: 'website', name: new URL(crawl.rootUrl).hostname, rootUrl: crawl.rootUrl, ...recordScope(website), ...(website.orgName ? { orgName: website.orgName, agentName: website.agentName } : {}), status: crawl.incomplete ? 'incomplete' : 'complete', limit: crawl.limit || undefined, crawledAt: crawl.crawledAt, createdAt: new Date().toISOString(), pages: crawl.pages, skipped: crawl.skipped, failed: crawl.failed };
   const chunks = crawl.pages.flatMap(page => chunkWebsiteText(page.text).map(chunk => ({ id: id('chunk'), documentId: snapshot.id, documentKind: 'website', websiteId: website.id, snapshotId: snapshot.id, pageId: page.id, sourceUrl: page.url, sourceTitle: page.title, ...chunk, vector: null, createdAt: snapshot.createdAt })));
   const vectors = await embedAll(control, chunks.map(chunk => chunk.text));
   if (vectors.length !== chunks.length) throw new Error('Website indexing did not complete.');
@@ -490,7 +653,7 @@ async function createWebsiteSnapshot(control, website, rootUrl) {
 app.post('/api/websites', async (req, res, next) => {
   try {
     const rootUrl = normalizeWebsiteUrl(req.body.url).href;
-    const website = { id: id('site'), rootUrl, createdAt: new Date().toISOString() };
+    const website = { id: id('site'), rootUrl, ...requestedScope(readStore(), req.body), createdAt: new Date().toISOString() };
     const { snapshot, chunks } = await createWebsiteSnapshot(openAIControlConnection(readStore()), website, rootUrl);
     const store = readStore(); store.websites.push(website); store.websiteSnapshots.push(snapshot); store.chunks.push(...chunks);
     saveStore(store); res.status(201).json(publicWebsiteSnapshot(snapshot, store.chunks));
@@ -500,10 +663,19 @@ app.post('/api/websites/:id/recrawl', async (req, res, next) => {
   try {
     const initial = readStore(); const website = initial.websites.find(item => item.id === req.params.id);
     if (!website) throw new Error('Website source not found.');
+    if (website.orgId) requestedScope(initial, website);
     const { snapshot, chunks } = await createWebsiteSnapshot(openAIControlConnection(initial), website, website.rootUrl);
     const store = readStore(); if (!store.websites.some(item => item.id === website.id)) throw new Error('Website source not found.');
     store.websiteSnapshots.push(snapshot); store.chunks.push(...chunks);
     saveStore(store); res.status(201).json(publicWebsiteSnapshot(snapshot, store.chunks));
+  } catch (error) { next(error); }
+});
+app.delete('/api/websites/:id', (req, res, next) => {
+  try {
+    const store = readStore(); const website = store.websites.find(item => item.id === req.params.id);
+    if (!website) return res.status(404).json({ error: 'Website source not found.' });
+    if (recordScope(website)) requestedScope(store, website);
+    removeWebsiteData(store, req.params.id); saveStore(store); res.status(204).end();
   } catch (error) { next(error); }
 });
 app.get('/api/website-snapshots/:snapshotId/pages/:pageId', (req, res) => {
@@ -544,6 +716,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
   try {
     const { documentId, connectionId, count = 10 } = req.body; const store = readStore(); const document = resolveDocument(store, documentId); const connection = store.connections.find(item => item.id === connectionId && item.role === 'control');
     if (!document || !connection) throw new Error('A document and control-model connection are required.');
+    if (recordScope(document)) requestedScope(store, document);
     const technical = document.kind === 'technical'; const website = document.kind === 'website';
     const caseType = website ? 'website knowledge-base evaluation cases' : technical ? 'technical-document evaluation cases' : 'customer-facing policy evaluation cases';
     const sources = website ? sourcePassages(document).slice(0, 120) : sourcePassages(document);
@@ -551,13 +724,17 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const raw = await callModel(connection, [{ role: 'system', content: 'You create precise, source-grounded datasets for testing agents.' }, { role: 'user', content: prompt }], true);
     const cases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!cases.length) throw new Error('The control model did not cite any valid source passages. Please try again.');
-    const dataset = { id: id('dataset'), documentId, documentKind: document.kind, ...(website ? { snapshotId: document.id } : {}), status: 'draft', cases, createdAt: new Date().toISOString() };
-    store.datasets.push(dataset); saveStore(store); res.status(201).json(dataset);
+    const dataset = { id: id('dataset'), documentId, documentKind: document.kind, ...recordScope(document), ...(document.orgName ? { orgName: document.orgName, agentName: document.agentName } : {}), ...(website ? { snapshotId: document.id } : {}), status: 'draft', cases, createdAt: new Date().toISOString() };
+    const latest = readStore();
+    const latestSource = resolveDocument(latest, documentId);
+    if (!latestSource || !sameScope(latestSource, document)) throw new Error('The source changed while generating the dataset. Try again.');
+    latest.datasets.push(dataset); saveStore(latest); res.status(201).json(dataset);
   } catch (error) { next(error); }
 });
 app.put('/api/datasets/:id', (req, res) => {
   const store = readStore(); const dataset = store.datasets.find(item => item.id === req.params.id);
   if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+  if (recordScope(dataset)) requestedScope(store, dataset);
   if (dataset.status === 'approved') return res.status(400).json({ error: 'Approved datasets cannot be changed.' });
   if (!Array.isArray(req.body.cases) || !req.body.cases.length) return res.status(400).json({ error: 'At least one scenario is required.' });
   const source = resolveDocument(store, dataset.documentId); if (!source) return res.status(400).json({ error: 'The source for this dataset is unavailable.' });
@@ -567,6 +744,7 @@ app.put('/api/datasets/:id', (req, res) => {
 app.post('/api/datasets/:id/approve', (req, res) => {
   const store = readStore(); const dataset = store.datasets.find(item => item.id === req.params.id);
   if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+  if (recordScope(dataset)) requestedScope(store, dataset);
   if (!dataset.cases.length) return res.status(400).json({ error: 'Every approved dataset needs at least one scenario.' });
   dataset.status = 'approved'; dataset.approvedAt = new Date().toISOString(); saveStore(store); res.json(dataset);
 });
@@ -578,6 +756,8 @@ app.post('/api/evaluations', async (req, res, next) => {
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     const document = dataset && resolveDocument(store, dataset.documentId);
     if (!dataset || !target || !control || !document) throw new Error('An approved dataset, its document, target agent, and control model are required.');
+    if (!sameScope(dataset, document)) throw new Error('The dataset belongs to a different source or agent.');
+    if (target.kind === 'flexagent-livekit' || recordScope(dataset)) throw new Error('Use the selected agent’s LiveKit evaluation for this benchmark.');
     if (document.kind === 'technical' && target.kind === 'flexagent') throw new Error('Technical document evaluation requires a model target that can receive retrieved source sections.');
     if (document.kind === 'website' && target.kind === 'flexagent') throw new Error('Website evaluation requires a local model target that can receive retrieved source sections.');
     if (document.kind === 'technical') {
@@ -629,7 +809,7 @@ app.post('/api/evaluations', async (req, res, next) => {
       const verdict = await scoreAnswer(control, answer, item); results.push({ case: item, answer, retrievedChunks: retrieved.map(({ vector, ...chunk }) => chunk), retrievalUnavailable: flexAgent, ...verdict });
     }
     const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), targetConnectionId, controlConnectionId, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
-    store.evaluations.unshift(evaluation); saveStore(store); res.status(201).json(evaluation);
+    const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
 app.post('/api/evaluations/manual', async (req, res, next) => {
@@ -638,6 +818,7 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
     const store = readStore(); const dataset = store.datasets.find(item => item.id === datasetId && item.status === 'approved');
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !control) throw new Error('An approved dataset and control model are required.');
+    if (recordScope(dataset)) requestedScope(store, dataset);
     if (!Array.isArray(answers) || answers.length !== dataset.cases.length || answers.some(answer => !String(answer || '').trim())) throw new Error('Paste one non-empty target answer for every scenario.');
     const results = [];
     for (const [index, item] of dataset.cases.entries()) {
@@ -645,8 +826,8 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
       const verdict = await scoreAnswer(control, answer, item);
       results.push({ case: item, answer, manual: true, retrievedChunks: [], retrievalUnavailable: true, ...verdict });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, targetConnectionId: null, controlConnectionId, manual: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
-    store.evaluations.unshift(evaluation); saveStore(store); res.status(201).json(evaluation);
+    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId: null, controlConnectionId, manual: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
+    const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
 app.post('/api/evaluations/livekit', async (req, res, next) => {
@@ -656,7 +837,8 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
     const target = store.connections.find(item => item.id === targetConnectionId && item.kind === 'flexagent-livekit');
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !target || !control) throw new Error('An approved dataset, LiveKit FlexAgent target, and control model are required.');
-    if (resolveDocument(store, dataset.documentId)?.kind === 'website') throw new Error('Website evaluations currently run through the local target model only.');
+    if (!sameScope(dataset, target) || !sameScope(dataset, resolveDocument(store, dataset.documentId))) throw new Error('The approved dataset does not belong to this FlexAgent.');
+    requestedScope(store, target);
     if (dataset.cases.some(item => item.turns?.length)) throw new Error('LiveKit widget evaluation currently supports single-turn scenarios only.');
     if (!Array.isArray(answers) || answers.length !== dataset.cases.length || answers.some(answer => !String(answer || '').trim())) throw new Error('LiveKit must return one non-empty answer for every scenario.');
     const results = [];
@@ -664,10 +846,10 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
       const answer = String(answers[index]).trim();
       results.push({ case: item, answer, livekit: true, retrievedChunks: [], retrievalUnavailable: true, ...(await scoreAnswer(control, answer, item)) });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, targetConnectionId, controlConnectionId, livekit: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
-    store.evaluations.unshift(evaluation); saveStore(store); res.status(201).json(evaluation);
+    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId, controlConnectionId, livekit: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
+    const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
-app.use((error, req, res, next) => { console.error(error); res.status(400).json({ error: error.message || 'Request failed.' }); });
-if (require.main === module) app.listen(Number(process.env.PORT || 4173), () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest };
+app.use((error, req, res, next) => { if (error.status) res.status(error.status); else res.status(400); res.json({ error: error.message || 'Request failed.' }); });
+if (require.main === module) app.listen(Number(process.env.PORT || 4173), '127.0.0.1', () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
+module.exports = { app, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest };

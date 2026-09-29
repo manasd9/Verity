@@ -1,15 +1,40 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, request as httpRequest } from 'node:http';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 
+const testDataDir = mkdtempSync(path.join(tmpdir(), 'eval-tool-test-'));
+process.env.EVAL_TOOL_DATA_DIR = testDataDir;
+process.env.APP_ENCRYPTION_KEY = 'a'.repeat(64);
 const require = createRequire(import.meta.url);
-const { chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest } = require('./server.js');
+const { app, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest } = require('./server.js');
 const { normalizeWebsiteUrl, isPublicAddress, isInScope, robotsAllows, browserExecutablePath } = require('./website-crawler.js');
 
 const html = readFileSync('index.html', 'utf8');
 const css = readFileSync('styles.css', 'utf8');
 const js = readFileSync('app.js', 'utf8');
 const server = readFileSync('server.js', 'utf8');
+
+function requestApp(listener, method, url, body) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ host: '127.0.0.1', port: listener.address().port, method, path: url, headers: body ? { 'Content-Type': 'application/json' } : {} }, response => {
+      let text = ''; response.setEncoding('utf8'); response.on('data', chunk => { text += chunk; }); response.on('end', () => resolve({ status: response.statusCode, body: text.trim().startsWith('{') ? JSON.parse(text) : text || null }));
+    });
+    request.on('error', reject); if (body) request.write(JSON.stringify(body)); request.end();
+  });
+}
+function requestDocument(listener, fields = {}, route = '/api/documents') {
+  const boundary = 'eval-tool-test-boundary';
+  const parts = [...Object.entries(fields).map(([name, value]) => `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`), `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="policy.txt"\r\nContent-Type: text/plain\r\n\r\nRiders can request a transit trip plan.\r\n`, `--${boundary}--\r\n`].join('');
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ host: '127.0.0.1', port: listener.address().port, method: 'POST', path: route, headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': Buffer.byteLength(parts) } }, response => {
+      let text = ''; response.setEncoding('utf8'); response.on('data', chunk => { text += chunk; }); response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(text) }));
+    });
+    request.on('error', reject); request.end(parts);
+  });
+}
 
 assert.match(html, /id="app"/);
 assert.match(js, /let uploadedDocument = null/);
@@ -34,9 +59,19 @@ assert.match(css, /prefers-reduced-motion/);
 assert.match(server, /aes-256-gcm/);
 assert.match(server, /app\.post\('\/api\/connections'/);
 assert.match(server, /app\.post\('\/api\/flexagent-target'/);
+assert.match(server, /app\.post\('\/api\/flexagent\/login'/);
+assert.match(server, /app\.post\('\/api\/flexagent\/organizations'/);
+assert.match(server, /app\.post\('\/api\/flexagent\/select-organization'/);
+assert.match(server, /app\.post\('\/api\/flexagent\/agents'/);
+assert.match(server, /app\.post\('\/api\/flexagent\/select-agent'/);
+assert.doesNotMatch(server, /express\.static\(root\)/);
 assert.match(server, /app\.post\('\/api\/flexagent-livekit-token'/);
 assert.match(server, /app\.post\('\/api\/evaluations\/livekit'/);
 assert.match(html, /vendor\/livekit-client\.js/);
+assert.match(js, /function waitForLiveKitAgent\(room\)/);
+assert.match(js, /state\(participant\) !== 'initializing'/);
+assert.match(js, /if \(afterQuestion && text\) finish\(null, text\)/);
+assert.match(js, /FlexAgent did not return a final answer within 90 seconds/);
 assert.match(server, /app\.post\('\/api\/openai-setup'/);
 assert.match(server, /app\.delete\('\/api\/connections\/:id'/);
 assert.match(server, /app\.put\('\/api\/connections\/:id\/prompt'/);
@@ -105,6 +140,11 @@ assert.match(js, /View retrieved policy sections/);
 assert.match(js, /Rubric/);
 assert.match(js, /FlexAgent target/);
 assert.match(js, /flexagent-form/);
+assert.match(js, /Connect FlexAgent/);
+assert.match(js, /flexagent-organization-picker/);
+assert.match(js, /flexagent-agent-picker/);
+assert.match(js, /loadFlexAgentOrganizations/);
+assert.match(js, /loadFlexAgentAgents/);
 assert.match(js, /FlexAgent used its own knowledge base/);
 assert.match(js, /LiveKit widget path/);
 assert.match(js, /liveKitAnswer/);
@@ -164,6 +204,19 @@ const technicalStore = { technicalDocuments: [{ id: 'tech_1' }, { id: 'tech_2' }
 assert.equal(removeTechnicalDocumentData(technicalStore, 'tech_1'), true);
 assert.deepEqual(technicalStore.technicalDocuments, [{ id: 'tech_2' }]);
 assert.deepEqual(technicalStore.chunks, [{ documentId: 'tech_2' }]);
+const websiteStore = { websites: [{ id: 'site_1' }, { id: 'site_2' }], websiteSnapshots: [{ id: 'snap_1a', websiteId: 'site_1' }, { id: 'snap_1b', websiteId: 'site_1' }, { id: 'snap_2', websiteId: 'site_2' }], chunks: [{ documentId: 'snap_1a' }, { documentId: 'snap_1b' }, { documentId: 'snap_2' }, { documentId: 'doc_2' }], chatChunks: [{ documentId: 'snap_1b' }, { documentId: 'doc_2' }], datasets: [{ id: 'set_1a', documentId: 'snap_1a' }, { id: 'set_1b', documentId: 'snap_1b' }, { id: 'set_2', documentId: 'snap_2' }], evaluations: [{ datasetId: 'set_1a' }, { datasetId: 'set_1b' }, { datasetId: 'set_2' }], chats: [{ documentId: 'snap_1a' }, { documentId: 'doc_2' }], agentConfigs: [{ documentId: 'snap_1b' }, { documentId: 'snap_2' }] };
+assert.equal(removeWebsiteData(websiteStore, 'missing'), false);
+assert.equal(removeWebsiteData(websiteStore, 'site_1'), true);
+assert.deepEqual(websiteStore.websites, [{ id: 'site_2' }]);
+assert.deepEqual(websiteStore.websiteSnapshots, [{ id: 'snap_2', websiteId: 'site_2' }]);
+assert.deepEqual(websiteStore.chunks, [{ documentId: 'snap_2' }, { documentId: 'doc_2' }]);
+assert.deepEqual(websiteStore.chatChunks, [{ documentId: 'doc_2' }]);
+assert.deepEqual(websiteStore.datasets, [{ id: 'set_2', documentId: 'snap_2' }]);
+assert.deepEqual(websiteStore.evaluations, [{ datasetId: 'set_2' }]);
+assert.deepEqual(websiteStore.chats, [{ documentId: 'doc_2' }]);
+assert.deepEqual(websiteStore.agentConfigs, [{ documentId: 'snap_2' }]);
+assert.match(server, /app\.delete\('\/api\/websites\/:id'/);
+assert.match(js, /js-remove-website/);
 const withMessage = appendChatMessage({ messages: [] }, 'user', 'I live in Boston.', '2026-09-21T12:00:00.000Z');
 assert.equal(withMessage.messages.length, 1);
 assert.match(withMessage.messages[0].id, /^msg_/);
@@ -218,4 +271,92 @@ const combinedDiagnosis = multiTurnGapDiagnosis([{ ...gapVerdict, turn: rubric }
 assert.deepEqual(combinedDiagnosis.categories, ['Likely retrieval miss', 'Conversation memory gap']);
 assert.match(combinedDiagnosis.why, /3 of 3.*1 expected conversation detail/);
 assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }), undefined);
+const listener = createServer(app);
+await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+const originalFetch = globalThis.fetch;
+try {
+  const remoteCalls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    remoteCalls.push({ url: String(url), options });
+    if (String(url).endsWith('/v1/auth/login')) return new Response(JSON.stringify({ accessToken: 'test-access-token' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).endsWith('/v1/org/list')) return new Response(JSON.stringify({ orgs: [{ id: '65f000000000000000000001', name: 'AI Dev Lab', status: 'active' }, { id: '65f000000000000000000003', name: 'Inactive', status: 'inactive' }, { id: 'bad', name: 'Ignore me', status: 'active' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).endsWith('/v1/agent/list')) return new Response(JSON.stringify({ agents: [{ id: '65f000000000000000000002', name: 'Transit Planner', persona: 'private' }, { id: '65f000000000000000000004', name: 'Another Agent' }, { id: 'bad', name: 'Ignore me' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).endsWith('/v1/livekit/token')) return new Response(JSON.stringify({ token: 'temporary-livekit-token', wsUrl: 'wss://example.livekit.cloud' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).endsWith('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(JSON.parse(options.body).messages[0].content.startsWith('Judge answers') ? { score: 100, pass: true, missingPoints: [], forbiddenClaims: [], rationale: 'Grounded.' } : { cases: [{ question: 'What can riders request?', expectedAnswer: 'A transit trip plan.', requiredPoints: ['Transit trip plan'], forbiddenPoints: [], sourceIndex: 1 }] }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const home = await requestApp(listener, 'GET', '/');
+  assert.equal(home.status, 200);
+  assert.equal((await requestApp(listener, 'GET', '/data/store.json')).status, 404);
+  assert.equal((await requestApp(listener, 'GET', '/.env')).status, 404);
+  const login = await requestApp(listener, 'POST', '/api/flexagent/login', { baseUrl: 'https://api-staging.flexagents.ai', email: 'test@example.com', password: 'private-password', parentOrigin: 'http://127.0.0.1:4173' });
+  assert.equal(login.status, 201);
+  assert.equal(login.body.session.connected, true);
+  const stored = readFileSync(path.join(testDataDir, 'store.json'), 'utf8');
+  assert.doesNotMatch(stored, /private-password|test-access-token/);
+  const state = await requestApp(listener, 'GET', '/api/state');
+  assert.equal(state.body.flexAgentSession.connected, true);
+  assert.doesNotMatch(JSON.stringify(state.body), /accessToken|test-access-token/);
+  const organizations = await requestApp(listener, 'POST', '/api/flexagent/organizations');
+  assert.deepEqual(organizations.body.organizations, [{ id: '65f000000000000000000001', name: 'AI Dev Lab' }]);
+  const organization = await requestApp(listener, 'POST', '/api/flexagent/select-organization', { orgId: '65f000000000000000000001' });
+  assert.equal(organization.body.session.orgName, 'AI Dev Lab');
+  const agents = await requestApp(listener, 'POST', '/api/flexagent/agents');
+  assert.deepEqual(agents.body.agents, [{ id: '65f000000000000000000002', name: 'Transit Planner' }, { id: '65f000000000000000000004', name: 'Another Agent' }]);
+  assert.equal(remoteCalls.at(-1).options.headers.Authorization, 'Bearer test-access-token');
+  const selected = await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000002' });
+  assert.equal(selected.body.target.name, 'Transit Planner');
+  assert.equal(selected.body.target.kind, 'flexagent-livekit');
+  const liveKitToken = await requestApp(listener, 'POST', '/api/flexagent-livekit-token', { targetConnectionId: selected.body.target.id });
+  assert.equal(liveKitToken.status, 200);
+  assert.equal(liveKitToken.body.wsUrl, 'wss://example.livekit.cloud');
+  assert.equal(remoteCalls.at(-1).options.headers.Authorization, undefined);
+  assert.equal(JSON.parse(remoteCalls.at(-1).options.body).parentOrigin, 'http://127.0.0.1:4173');
+  const scopedDocument = await requestDocument(listener, { orgId: '65f000000000000000000001', agentId: '65f000000000000000000002' });
+  assert.equal(scopedDocument.status, 201);
+  assert.equal(scopedDocument.body.agentId, '65f000000000000000000002');
+  const technicalDocument = await requestDocument(listener, { orgId: '65f000000000000000000001', agentId: '65f000000000000000000002' }, '/api/technical-documents');
+  assert.equal(technicalDocument.status, 201);
+  assert.equal(technicalDocument.body.agentId, '65f000000000000000000002');
+  assert.equal((await requestDocument(listener, { orgId: '65f000000000000000000001', agentId: '65f000000000000000000004' })).status, 400);
+  const localDocument = await requestDocument(listener);
+  assert.equal(localDocument.status, 201);
+  assert.equal(localDocument.body.agentId, undefined);
+  const control = await requestApp(listener, 'POST', '/api/connections', { name: 'Control', role: 'control', baseUrl: 'https://mock-model.example', model: 'test-model', apiKey: 'test-key' });
+  const dataset = await requestApp(listener, 'POST', '/api/datasets/generate', { documentId: scopedDocument.body.id, connectionId: control.body.id, count: 1 });
+  assert.equal(dataset.status, 201);
+  assert.equal(dataset.body.agentId, '65f000000000000000000002');
+  assert.equal((await requestApp(listener, 'POST', `/api/datasets/${dataset.body.id}/approve`)).status, 200);
+  const run = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['A transit trip plan.'] });
+  assert.equal(run.status, 201);
+  assert.equal(run.body.agentName, 'Transit Planner');
+  const testStorePath = path.join(testDataDir, 'store.json');
+  const websiteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+  websiteStore.websiteSnapshots.push({ id: 'site_snapshot_test', websiteId: 'site_test', kind: 'website', name: 'transit.example', status: 'complete', orgId: '65f000000000000000000001', agentId: '65f000000000000000000002', orgName: 'AI Dev Lab', agentName: 'Transit Planner', pages: [{ id: 'page_test', url: 'https://transit.example/help', text: 'Riders can request a transit trip plan.' }] });
+  websiteStore.datasets.push({ id: 'dataset_website_test', documentId: 'site_snapshot_test', documentKind: 'website', orgId: '65f000000000000000000001', agentId: '65f000000000000000000002', orgName: 'AI Dev Lab', agentName: 'Transit Planner', status: 'approved', cases: [{ question: 'What can riders request?', expectedAnswer: 'A transit trip plan.', requiredPoints: [], forbiddenPoints: [], sourceEvidence: 'Riders can request a transit trip plan.', sourceUrl: 'https://transit.example/help' }] });
+  writeFileSync(testStorePath, JSON.stringify(websiteStore));
+  const websiteRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: 'dataset_website_test', targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['A transit trip plan.'] });
+  assert.equal(websiteRun.status, 201);
+  assert.equal(websiteRun.body.documentKind, 'website');
+  await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000004' });
+  assert.equal((await requestApp(listener, 'DELETE', `/api/documents/${scopedDocument.body.id}`)).status, 400);
+  const mismatchedDataset = await requestApp(listener, 'POST', '/api/datasets/generate', { documentId: scopedDocument.body.id, connectionId: control.body.id, count: 1 });
+  assert.equal(mismatchedDataset.status, 400);
+  const mismatchedRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['A transit trip plan.'] });
+  assert.equal(mismatchedRun.status, 400);
+  assert.match(mismatchedRun.body.error, /does not belong/);
+  const history = await requestApp(listener, 'GET', '/api/state');
+  assert.equal(history.body.evaluations[0].agentId, '65f000000000000000000002');
+  assert.equal(history.body.evaluations[0].agentName, 'Transit Planner');
+  globalThis.fetch = async () => new Response('', { status: 401 });
+  const expired = await requestApp(listener, 'POST', '/api/flexagent/agents');
+  assert.equal(expired.status, 401);
+  const expiredState = await requestApp(listener, 'GET', '/api/state');
+  assert.equal(expiredState.body.flexAgentSession.connected, false);
+  assert.equal(expiredState.body.flexAgentSession.selectedAgentName, 'Another Agent');
+} finally {
+  globalThis.fetch = originalFetch;
+  await new Promise(resolve => listener.close(resolve));
+  rmSync(testDataDir, { recursive: true, force: true });
+}
 console.log('Workspace checks passed.');
