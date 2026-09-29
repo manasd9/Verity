@@ -33,6 +33,8 @@ function scopeControls() {
   return `<section class="panel card-pad workspace-scope" aria-label="Evaluation workspace"><div class="form-grid"><div class="field"><label for="workspace-organization">Organization</label><select id="workspace-organization">${orgOptions}</select></div><div class="field"><label for="workspace-agent">Agent</label><select id="workspace-agent" ${workspaceMode !== 'flex' || !viewScope?.orgId ? 'disabled' : ''}>${agentOptions}</select></div></div><p class="help">${help}</p>${workspaceMode === 'flex' && !connected ? '<a href="#settings">Open Settings</a>' : ''}</section>`;
 }
 let reviewingDatasetId = null;
+let reviewScenarioIndex = 0;
+let reviewScenarioDatasetId = null;
 let viewingEvaluationId = null;
 let activeChatId = null;
 let chatDocumentId = null;
@@ -170,11 +172,19 @@ function datasets() {
     <div class="two-col"><section class="panel card-pad">${ready ? `<h2 class="minor-title">Generate a draft dataset</h2><form id="generate-form" class="form-grid"><div class="field"><label for="dataset-document">Source</label><select id="dataset-document">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selectedDocumentId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="dataset-count">Scenarios</label><input id="dataset-count" type="number" min="1" max="30" value="10" /></div><div class="field full"><label for="dataset-control">Control model</label><select id="dataset-control">${controls.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field full"><button class="button button-primary" type="submit">Generate draft scenarios</button><p id="generation-status" class="help" aria-live="polite">The control model will create a draft for you to review.</p></div></form>${drafts ? `<div class="document-list">${drafts}</div>` : ''}` : `<h2 class="minor-title">No golden datasets yet</h2><p class="page-subtitle">Add a source and a control-model connection in Settings first.</p>`}</section><aside class="callout"><h3>Your benchmark, not a guess</h3><p>Every approved case contains the customer scenario, expected outcome, required rules, and source evidence.</p></aside></div>`;
 }
 
+function reviewScenarioLabel(item) { return String(item.question || item.turns?.[0]?.userMessage || '').trim() || 'New scenario'; }
+function reviewScenarioIncomplete(item) { return !(item.turns || []).length && ![item.question, item.expectedAnswer, item.sourceEvidence].every(value => String(value || '').trim()); }
 function datasetReview(dataset) {
   const editable = dataset.status !== 'approved';
-  const cases = dataset.cases.map((item, index) => `<fieldset class="review-case"><legend>Scenario ${index + 1}</legend>${editable && dataset.cases.length > 1 ? `<button class="review-delete js-delete-scenario" data-index="${index}" type="button">Remove scenario</button>` : ''}<div class="form-grid"><div class="field full"><label>Customer question or scenario</label><textarea data-field="question" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.question || '')}</textarea></div><div class="field full"><label>Expected answer</label><textarea data-field="expectedAnswer" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.expectedAnswer || '')}</textarea></div><div class="field"><label>Required points (one per line)</label><textarea data-field="requiredPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.requiredPoints || []).join('\n'))}</textarea></div><div class="field"><label>Forbidden points (one per line)</label><textarea data-field="forbiddenPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.forbiddenPoints || []).join('\n'))}</textarea></div>${dataset.documentKind === 'website' ? `<div class="field full"><label>Website page URL</label><input data-field="sourceUrl" data-index="${index}" value="${escapeHtml(item.sourceUrl || '')}" ${editable ? '' : 'readonly'} /></div>` : ''}<div class="field full"><label>Source evidence</label><textarea data-field="sourceEvidence" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.sourceEvidence || '')}</textarea></div><div class="field full"><label>Conversation turns (JSON, optional)</label><textarea data-field="turns" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='[{"userMessage":"...","expectedAnswer":"...","requiredPoints":[],"forbiddenPoints":[],"sourceEvidence":"..."}]'>${escapeHtml((item.turns || []).length ? JSON.stringify(item.turns, null, 2) : '')}</textarea></div><div class="field full"><label>Expected final memory (JSON string array, optional)</label><textarea data-field="expectedFinalMemory" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='["name: Sam", "city: Boston"]'>${escapeHtml((item.expectedFinalMemory || []).length ? JSON.stringify(item.expectedFinalMemory, null, 2) : '')}</textarea></div></div></fieldset>`).join('');
-  const actions = editable ? `<div class="button-row"><button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button><button class="button button-secondary" type="submit">Save changes</button><button class="button button-primary js-approve" data-id="${escapeHtml(dataset.id)}" type="button">Save & approve</button></div><p id="review-status" class="help" aria-live="polite">Write or verify the expected answer and evidence for every scenario before approving.</p>` : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Back to datasets', 'primary', 'js-close-review')}${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
-  return `${header('Review golden dataset', `${dataset.cases.length} scenarios generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'primary', 'js-close-review'))}<section class="panel card-pad"><form id="dataset-review-form">${cases}${actions}</form></section>`;
+  if (reviewScenarioDatasetId !== dataset.id) { reviewScenarioDatasetId = dataset.id; reviewScenarioIndex = 0; }
+  reviewScenarioIndex = Math.min(Math.max(reviewScenarioIndex, 0), dataset.cases.length - 1);
+  const active = reviewScenarioIndex;
+  const hasAdvanced = item => Boolean((item.turns || []).length || (item.expectedFinalMemory || []).length);
+  const cases = dataset.cases.map((item, index) => `<fieldset id="review-case-${index}" class="review-case" ${index === active ? '' : 'hidden'}><legend>Scenario ${index + 1} of ${dataset.cases.length}</legend>${editable && dataset.cases.length > 1 ? `<button class="review-delete js-delete-scenario" data-index="${index}" type="button">Remove scenario</button>` : ''}<div class="form-grid"><div class="field full"><label>Customer question or scenario</label><textarea data-field="question" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.question || '')}</textarea></div><div class="field full"><label>Expected answer</label><textarea data-field="expectedAnswer" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.expectedAnswer || '')}</textarea></div><div class="field"><label>Required points (one per line)</label><textarea data-field="requiredPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.requiredPoints || []).join('\n'))}</textarea></div><div class="field"><label>Forbidden points (one per line)</label><textarea data-field="forbiddenPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.forbiddenPoints || []).join('\n'))}</textarea></div>${dataset.documentKind === 'website' ? `<div class="field full"><label>Website page URL</label><input data-field="sourceUrl" data-index="${index}" value="${escapeHtml(item.sourceUrl || '')}" ${editable ? '' : 'readonly'} /></div>` : ''}<div class="field full"><label>Source evidence</label><textarea data-field="sourceEvidence" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.sourceEvidence || '')}</textarea></div><details class="review-advanced" ${hasAdvanced(item) ? 'open' : ''}><summary>Advanced: multi-turn conversation (optional)</summary><div class="form-grid"><div class="field full"><label>Conversation turns (JSON, optional)</label><textarea data-field="turns" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='[{"userMessage":"...","expectedAnswer":"...","requiredPoints":[],"forbiddenPoints":[],"sourceEvidence":"..."}]'>${escapeHtml((item.turns || []).length ? JSON.stringify(item.turns, null, 2) : '')}</textarea></div><div class="field full"><label>Expected final memory (JSON string array, optional)</label><textarea data-field="expectedFinalMemory" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='["name: Sam", "city: Boston"]'>${escapeHtml((item.expectedFinalMemory || []).length ? JSON.stringify(item.expectedFinalMemory, null, 2) : '')}</textarea></div></div></details></div></fieldset>`).join('');
+  const list = dataset.cases.map((item, index) => `<button class="review-list-item js-review-pick" data-index="${index}" type="button" ${index === active ? 'aria-current="true"' : ''}><span class="review-list-number">${index + 1}</span><span class="review-list-text">${escapeHtml(reviewScenarioLabel(item))}</span>${reviewScenarioIncomplete(item) ? '<span class="review-list-flag" title="Question, expected answer, or source evidence is empty">Needs input</span>' : ''}</button>`).join('');
+  const pager = `<div class="review-pager"><span id="review-position">Scenario ${active + 1} of ${dataset.cases.length}</span><div class="button-row"><button class="button button-secondary button-small js-review-step" data-step="-1" type="button" ${active === 0 ? 'disabled' : ''}>‹ Previous</button><button class="button button-secondary button-small js-review-step" data-step="1" type="button" ${active === dataset.cases.length - 1 ? 'disabled' : ''}>Next ›</button></div></div>`;
+  const actions = editable ? `<div class="button-row"><button class="button button-secondary" type="submit">Save changes</button><button class="button button-primary js-approve" data-id="${escapeHtml(dataset.id)}" type="button">Save & approve</button></div><p id="review-status" class="help" aria-live="polite">Write or verify the expected answer and evidence for every scenario before approving.</p>` : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Back to datasets', 'primary', 'js-close-review')}${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
+  return `${header('Review golden dataset', `${dataset.cases.length} scenarios generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'primary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
 }
 
 function chat() {
@@ -369,6 +379,15 @@ function bind(page) {
   document.querySelector('.js-go-evaluation')?.addEventListener('click', () => { reviewingDatasetId = null; location.hash = 'evaluation'; });
   document.querySelector('#dataset-review-form')?.addEventListener('submit', saveDatasetReview);
   document.querySelector('.js-add-scenario')?.addEventListener('click', addDatasetScenario);
+  document.querySelectorAll('.js-review-pick').forEach(item => item.addEventListener('click', () => showReviewScenario(Number(item.dataset.index))));
+  document.querySelectorAll('.js-review-step').forEach(button => button.addEventListener('click', () => showReviewScenario(reviewScenarioIndex + Number(button.dataset.step))));
+  document.querySelector('.review-list-scroll')?.addEventListener('keydown', event => {
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    const count = document.querySelectorAll('.js-review-pick').length;
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : reviewScenarioIndex + (event.key === 'ArrowDown' ? 1 : -1);
+    event.preventDefault(); showReviewScenario(next); document.querySelector(`.js-review-pick[data-index="${reviewScenarioIndex}"]`)?.focus();
+  });
+  document.querySelector('#dataset-review-form')?.addEventListener('input', event => { const index = event.target.dataset?.index; if (['question', 'expectedAnswer', 'sourceEvidence', 'turns'].includes(event.target.dataset?.field) && index !== undefined) refreshReviewListItem(index); });
   document.querySelectorAll('.js-delete-scenario').forEach(button => button.addEventListener('click', () => deleteDatasetScenario(Number(button.dataset.index))));
   document.querySelectorAll('.js-approve').forEach(button => button.addEventListener('click', () => approveDataset(button.dataset.id)));
   document.querySelector('#customer-chat-form')?.addEventListener('submit', askCustomerAgent);
@@ -655,15 +674,35 @@ async function persistDatasetReview(form, dataset) {
   workspace.datasets = workspace.datasets.map(item => item.id === body.id ? body : item); return body;
 }
 
+// Shows one scenario in place; all scenarios stay in the form so Save and Approve read every field.
+function showReviewScenario(index) {
+  const cards = [...document.querySelectorAll('.review-case')]; if (!cards.length) return;
+  reviewScenarioIndex = Math.min(Math.max(index, 0), cards.length - 1);
+  cards.forEach((card, position) => { card.hidden = position !== reviewScenarioIndex; });
+  document.querySelectorAll('.js-review-pick').forEach(item => { if (Number(item.dataset.index) === reviewScenarioIndex) { item.setAttribute('aria-current', 'true'); item.scrollIntoView({ block: 'nearest' }); } else item.removeAttribute('aria-current'); });
+  const position = document.querySelector('#review-position'); if (position) position.textContent = `Scenario ${reviewScenarioIndex + 1} of ${cards.length}`;
+  document.querySelectorAll('.js-review-step').forEach(button => { const step = Number(button.dataset.step); button.disabled = step < 0 ? reviewScenarioIndex === 0 : reviewScenarioIndex === cards.length - 1; });
+  const detail = document.querySelector('.review-detail'); if (detail && detail.getBoundingClientRect().top < 0) detail.scrollIntoView({ block: 'start' });
+}
+function refreshReviewListItem(index) {
+  const item = document.querySelector(`.js-review-pick[data-index="${index}"]`); const form = document.querySelector('#dataset-review-form'); if (!item || !form) return;
+  const value = field => form.querySelector(`[data-field="${field}"][data-index="${index}"]`)?.value || '';
+  let turns = []; try { turns = value('turns').trim() ? JSON.parse(value('turns')) : []; } catch {}
+  const draft = { question: value('question'), expectedAnswer: value('expectedAnswer'), sourceEvidence: value('sourceEvidence'), turns: Array.isArray(turns) ? turns : [] };
+  item.querySelector('.review-list-text').textContent = reviewScenarioLabel(draft);
+  const flag = item.querySelector('.review-list-flag'); const incomplete = reviewScenarioIncomplete(draft);
+  if (incomplete && !flag) item.insertAdjacentHTML('beforeend', '<span class="review-list-flag" title="Question, expected answer, or source evidence is empty">Needs input</span>');
+  if (!incomplete && flag) flag.remove();
+}
 function addDatasetScenario() {
   const dataset = workspace.datasets.find(item => item.id === reviewingDatasetId);
-  dataset.cases.push({ question: '', expectedAnswer: '', requiredPoints: [], forbiddenPoints: [], sourceEvidence: '', turns: [], expectedFinalMemory: [] }); render('datasets');
+  dataset.cases.push({ question: '', expectedAnswer: '', requiredPoints: [], forbiddenPoints: [], sourceEvidence: '', turns: [], expectedFinalMemory: [] }); reviewScenarioIndex = dataset.cases.length - 1; render('datasets');
 }
 
 function deleteDatasetScenario(index) {
   const dataset = workspace.datasets.find(item => item.id === reviewingDatasetId);
   if (dataset.cases.length < 2) return;
-  dataset.cases.splice(index, 1); render('datasets');
+  dataset.cases.splice(index, 1); if (reviewScenarioIndex >= index && reviewScenarioIndex > 0) reviewScenarioIndex -= 1; render('datasets');
 }
 
 async function saveDatasetReview(event) {
