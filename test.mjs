@@ -638,15 +638,28 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   assert.equal(JSON.parse(judgeUser.content).answer, attack);
   assert.equal(JSON.parse(judgeUser.content).rubric.sourceEvidence, hostileText);
 
-  // Behavior is unchanged: the verdict is still whatever the control model returns, and the hardened messages are what gets sent.
-  const savedFetch = globalThis.fetch; const sent = [];
+  // The score and points are the judge's, the hardened messages are what gets sent, and PASS follows the rubric rule.
+  const savedFetch = globalThis.fetch; const sent = []; let judgeReply;
   try {
-    globalThis.fetch = async (url, init) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ score: 12, pass: false, missingPoints: ['30 days'], forbiddenClaims: [], rationale: 'Did not answer.' }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }); };
-    const verdict = await scoreAnswer({ baseUrl: 'https://mock-model.example', model: 'test-model', secret: encrypt('test-key'), judgeSupport: { reasoningEffort: false, temperature: true } }, attack, rubric);
+    globalThis.fetch = async (url, init) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(judgeReply) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }); };
+    const judge = { baseUrl: 'https://mock-model.example', model: 'test-model', secret: encrypt('test-key'), judgeSupport: { reasoningEffort: false, temperature: true } };
+    judgeReply = { score: 12, pass: false, missingPoints: ['30 days'], forbiddenClaims: [], rationale: 'Did not answer.' };
+    const verdict = await scoreAnswer(judge, attack, rubric);
     assert.equal(verdict.score, 12); assert.equal(verdict.pass, false); assert.deepEqual(verdict.missingPoints, ['30 days']);
     assert.equal(sent.length, 1); assert.equal(sent[0].temperature, 0);
     assert.ok(sent[0].messages[0].content.includes(UNTRUSTED_SOURCE_NOTICE));
     assert.equal(JSON.parse(sent[0].messages[1].content).answer, attack);
+    // The judge's own yes/no no longer decides: a missed required point is a GAP even at a high score...
+    judgeReply = { score: 88, pass: true, missingPoints: ['Advance Purchase rules differ'], forbiddenClaims: [], rationale: 'Mostly right.' };
+    const lenient = await scoreAnswer(judge, attack, rubric);
+    assert.equal(lenient.pass, false); assert.equal(lenient.judgePass, true); assert.equal(lenient.score, 88); assert.match(lenient.gapDiagnosis.why, /misses 1 of 1 required rubric points/);
+    // ...an unsupported claim is a GAP...
+    judgeReply = { score: 90, pass: true, missingPoints: [], forbiddenClaims: ['Promises a refund'], rationale: 'Adds a claim.' };
+    assert.equal((await scoreAnswer(judge, attack, rubric)).pass, false);
+    // ...and a complete, supported answer passes even if the judge said no.
+    judgeReply = { score: 70, pass: false, missingPoints: [], forbiddenClaims: [], rationale: 'Terse but complete.' };
+    const strict = await scoreAnswer(judge, attack, rubric);
+    assert.equal(strict.pass, true); assert.equal(strict.judgePass, false); assert.equal(strict.gapDiagnosis, undefined);
   } finally { globalThis.fetch = savedFetch; }
 }
 // Judge settings come from test calls against the model, not from its name, so any OpenAI-compatible provider works.
