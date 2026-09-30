@@ -399,7 +399,7 @@ const pages = { home, evaluation, documents, technical, datasets, chat, results,
 function render(page = location.hash.slice(1).split(':')[0] || 'home') {
   const scopedPages = new Set(['documents', 'datasets', 'evaluation', 'results', 'technical']);
   app.innerHTML = `${scopedPages.has(page) ? scopeControls() : ''}${pages[page] ? pages[page]() : pages.home()}`;
-  if (!canWriteWorkspace()) app.querySelectorAll('#file-input, #technical-file-input, #website-form input, #website-form button, #generate-form button, .manual-evaluation-form button, .js-source-dataset, .js-remove-document, .js-recrawl-website, .js-remove-website, .js-remove-technical-document, .js-approve, .js-add-scenario, .js-delete-scenario, #dataset-review-form button[type="submit"], #dataset-review-form textarea, #dataset-review-form input').forEach(input => { input.disabled = true; });
+  if (!canWriteWorkspace()) app.querySelectorAll('#file-input, #technical-file-input, #website-form input, #website-form button, #generate-form button, .manual-evaluation-form button, .js-source-dataset, .js-remove-document, .js-recrawl-website, .js-remove-website, .js-remove-technical-document, .js-approve, .js-add-scenario, .js-delete-scenario, #dataset-review-form button[type="submit"], #dataset-review-form textarea, #dataset-review-form input').forEach(input => { input.disabled = true; input.title = 'Reconnect FlexAgent in Settings to change this agent’s sources, datasets, or evaluations.'; });
   document.querySelectorAll('.nav-link').forEach(link => link.classList.toggle('active', link.dataset.page === page));
   bind(page);
 }
