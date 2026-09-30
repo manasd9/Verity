@@ -9,7 +9,7 @@ const testDataDir = mkdtempSync(path.join(tmpdir(), 'eval-tool-test-'));
 process.env.EVAL_TOOL_DATA_DIR = testDataDir;
 process.env.APP_ENCRYPTION_KEY = 'a'.repeat(64);
 const require = createRequire(import.meta.url);
-const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, judgeParams, judgeSettings, checkJudgeSupport, callModel } = require('./server.js');
+const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, answerIsOnlyFiller, judgeParams, judgeSettings, checkJudgeSupport, callModel } = require('./server.js');
 const { normalizeWebsiteUrl, isPublicAddress, isInScope, robotsAllows, browserExecutablePath } = require('./website-crawler.js');
 
 const html = readFileSync('index.html', 'utf8');
@@ -79,7 +79,8 @@ assert.match(server, /app\.post\('\/api\/evaluations\/livekit'/);
 assert.match(html, /vendor\/livekit-client\.js/);
 assert.match(js, /function waitForLiveKitAgent\(room\)/);
 assert.match(js, /state\(participant\) !== 'initializing'/);
-assert.match(js, /await waitForLiveKitAgent\(room\); await waitForLiveKitGreeting\(room, events\);\s*return await collectLiveKitAnswer\(room, question, events\);/);
+assert.match(js, /await waitForLiveKitAgent\(room\); await waitForLiveKitGreeting\(room, events\);\s*return await collectLiveKitAnswer\(room, question, events, \{ expectShortReply \}\);/);
+assert.match(js, /liveKitAnswer\(targetConnectionId, item\.question, \{ expectShortReply: isDecline\(item\) \}\)/, 'should-decline cases do not wait 20 s for a short reply');
 assert.match(js, /const LIVEKIT_ANSWER_TIMEOUT_MS = 90000;/);
 assert.match(js, /FlexAgent did not return a final answer within \$\{timeoutMs \/ 1000\} seconds/);
 assert.match(server, /app\.post\('\/api\/openai-setup'/);
@@ -285,7 +286,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
 // LiveKit answer capture (app.js): replay FlexAgent's agent-state and transcription sequence against a fake room.
 {
   const start = js.indexOf('const LIVEKIT_QUIET_MS'); const end = js.indexOf('async function liveKitAnswer');
-  const { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete: browserLooksIncomplete, LIVEKIT_QUIET_MS } = new Function(`${js.slice(start, end)}; return { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete, LIVEKIT_QUIET_MS };`)();
+  const { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete: browserLooksIncomplete, answerIsOnlyFiller: browserOnlyFiller, LIVEKIT_QUIET_MS } = new Function(`${js.slice(start, end)}; return { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete, answerIsOnlyFiller, LIVEKIT_QUIET_MS };`)();
   assert.equal(LIVEKIT_QUIET_MS, 5000);
   const events = { ParticipantAttributesChanged: 'attributes' };
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -369,6 +370,23 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     const fake = fakeRoom('speaking'); const began = Date.now(); await waitForLiveKitGreeting(fake.room, events, { startMs: 20, maxMs: 120 });
     assert.ok(Date.now() - began >= 115);
   }
+  // Should-decline case: a short, real decline ends after the normal quiet period...
+  {
+    const fake = fakeRoom(); const began = Date.now(); const result = track(collectLiveKitAnswer(fake.room, 'Rooftop pool?', events, { ...timing, expectShortReply: true }));
+    fake.setState('thinking'); fake.stream('I do not have that information.'); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(120); assert.equal(result.value, 'I do not have that information.'); assert.ok(Date.now() - began < timing.shortReplyQuietMs, 'no long wait for a real short decline');
+  }
+  // ...but a filler line alone still gets the longer wait, so a slow search does not end the capture at "One moment please".
+  {
+    const fake = fakeRoom(); const result = track(collectLiveKitAnswer(fake.room, 'Rooftop pool?', events, { ...timing, expectShortReply: true }));
+    fake.setState('thinking'); fake.stream('One moment please...'); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(150); assert.equal(result.done, false, 'filler alone does not end a should-decline turn');
+    fake.setState('thinking'); fake.stream('I do not have that information.'); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(120); assert.equal(result.value, 'One moment please...\nI do not have that information.');
+  }
+  for (const [answer, onlyFiller] of [['One moment please...', true], ['Just a moment…', true], ['', true], ['I do not have that information.', false], ['One moment please... I do not have that information.', false]]) {
+    assert.equal(browserOnlyFiller(answer), onlyFiller, answer); assert.equal(answerIsOnlyFiller(answer), onlyFiller, answer);
+  }
   // Short or filler-like answers are flagged the same way in the browser and on the server.
   for (const [answer, incomplete] of [['One moment please...', true], ['Just a moment…', true], ['Let me check that for you.', true], ['Yes, until 9 pm.', true], ['', true], [longAnswer, false], [`One moment please... ${longAnswer}`, false], ['Let me check: the stop is 4512, served by routes 3 and 7 every fifteen minutes.', false]]) {
     assert.equal(browserLooksIncomplete(answer), incomplete, answer);
@@ -378,8 +396,31 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   {
     const helpers = js.slice(js.indexOf('const HTML_ESCAPES'), js.indexOf('\n', js.indexOf('function escapeHtml')));
     const summaryCode = js.slice(js.indexOf('function incompleteAnswersMarkup'), js.indexOf('\n}\n', js.indexOf('function evaluationSummaryMarkup')) + 2);
-    const { evaluationSummaryMarkup } = new Function(`${helpers}\n${summaryCode}; return { evaluationSummaryMarkup };`)();
+    const declineHelpers = js.slice(js.indexOf('const DECLINE_KIND_LABELS'), js.indexOf('function reviewScenarioIncomplete')) + js.slice(js.indexOf('function subScoresLabel'), js.indexOf('function incompleteAnswerNote'));
+    const { evaluationSummaryMarkup, subScoresLabel, reviewScenarioIncomplete } = new Function(`${helpers}\n${declineHelpers}\n${js.slice(js.indexOf('function reviewScenarioIncomplete'), js.indexOf('\n', js.indexOf('function reviewScenarioIncomplete')))}\n${summaryCode}; return { evaluationSummaryMarkup, subScoresLabel, reviewScenarioIncomplete };`)();
     const miss = { pass: false, gapDiagnosis: { categories: ['Likely retrieval miss'] }, answer: 'No.' };
+    {
+    const reviewedCode = js.slice(js.indexOf('function reviewedCases'), js.indexOf('\n}\n', js.indexOf('function reviewedCases')) + 2);
+    const { reviewedCases } = new Function(`${reviewedCode}; return { reviewedCases };`)();
+    const fields = { question: 'Rooftop pool?', expectedAnswer: 'Says it does not know.', requiredPoints: 'Says it does not know', forbiddenPoints: 'Invents details', sourceEvidence: '', turns: '', expectedFinalMemory: '', caseType: 'decline', declineKind: 'wrong-assumption' };
+    const form = { querySelector: selector => { const field = /data-field="([^"]+)"/.exec(selector)?.[1]; return field in fields ? { value: fields[field] } : null; } };
+    const [rebuilt] = reviewedCases(form, { cases: [{}] });
+    assert.equal(rebuilt.caseType, 'decline'); assert.equal(rebuilt.declineKind, 'wrong-assumption');
+    delete fields.caseType; delete fields.declineKind;
+    assert.equal('caseType' in reviewedCases(form, { cases: [{}] })[0], false);
+  }
+  // Should-decline cases: their own summary line, left out of the retrieval diagnosis, and sub-scores in the header.
+    const declineCase = { caseType: 'decline', declineKind: 'close-but-missing', question: 'Rooftop pool?' };
+    const withDeclines = evaluationSummaryMarkup({ results: [{ ...miss, case: { question: 'a' } }, { ...miss, case: { question: 'b' } }, { pass: false, case: declineCase, answer: 'Yes, open 8-10.' }, { pass: true, case: declineCase, answer: 'I do not have that information.' }] });
+    assert.match(withDeclines, /1 of 2 “should decline” questions were handled correctly\./);
+    assert.match(withDeclines, /Invented or unsupported answers: #3\./);
+    assert.match(withDeclines, /2 of 2 GAPs miss at least three quarters/, 'the retrieval diagnosis counts only answerable questions');
+    const onlyDeclineGaps = evaluationSummaryMarkup({ results: [{ pass: true, case: { question: 'a' } }, { pass: false, case: declineCase, answer: 'Yes.' }] });
+    assert.match(onlyDeclineGaps, /0 of 1 “should decline” question was handled correctly/); assert.doesNotMatch(onlyDeclineGaps, /<h2>Where to investigate first<\/h2>/);
+    assert.equal(subScoresLabel({ score: 80, answerScore: 90, declineScore: 50 }), 'Answers when it should: 90% · Declines when it should: 50%');
+    assert.equal(subScoresLabel({ score: 80 }), '');
+    assert.equal(reviewScenarioIncomplete({ caseType: 'decline', question: 'Rooftop pool?', expectedAnswer: 'Says it does not know.', sourceEvidence: '' }), false, 'a should-decline case needs no evidence');
+    assert.equal(reviewScenarioIncomplete({ question: 'Hours?', expectedAnswer: '9-5', sourceEvidence: '' }), true);
     const mixed = evaluationSummaryMarkup({ results: [{ ...miss, answerMayBeIncomplete: true }, miss, { ...miss, answerMayBeIncomplete: true }, miss, { pass: true }] });
     assert.match(mixed, /2 answers may be incomplete — re-run the evaluation\./);
     assert.match(mixed, /Scenarios #1, #3 got only a short or filler-like reply/);
@@ -664,6 +705,74 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     assert.equal(sent.length, 1);
   } finally { globalThis.fetch = savedFetch; }
 }
+// "Should decline" cases: questions the sources do not answer, where the agent should say so instead of inventing details.
+{
+  const { encrypt, scoringMessages, declineGenerationMessages, declineCases, declineCandidatePassages, checkDeclineCases, evaluationScores } = require('./server.js');
+  const decline = normalizeDatasetCase({ caseType: 'decline', question: 'Do you have a rooftop pool?', expectedAnswer: 'Says it does not know.', requiredPoints: ['Says it does not know'], forbiddenPoints: ['Invents pool details'] });
+  assert.equal(decline.caseType, 'decline'); assert.equal(decline.declineKind, 'close-but-missing'); assert.equal(decline.sourceEvidence, '');
+  assert.equal(normalizeDatasetCase({ ...decline, declineKind: 'bogus' }).declineKind, 'close-but-missing');
+  assert.equal(normalizeDatasetCase({ ...decline, declineKind: 'off-topic' }).declineKind, 'off-topic');
+  assert.throws(() => normalizeDatasetCase({ ...decline, turns: [{ userMessage: 'Hi' }] }), /single question/);
+  assert.throws(() => normalizeDatasetCase({ question: 'Hours?', expectedAnswer: '9-5' }), /policy evidence/, 'answerable cases still need evidence');
+  const answer = normalizeDatasetCase({ question: 'Hours?', expectedAnswer: '9-5', sourceEvidence: 'Open 9-5.' });
+  assert.equal('caseType' in answer, false, 'answerable cases keep their exact shape');
+  assert.deepEqual(validateWebsiteCases({ kind: 'website', pages: [] }, [decline]), [decline], 'website datasets accept should-decline cases without a page');
+
+  // The judge prompt for answerable cases is unchanged, byte for byte (fingerprint taken before item 3).
+  const rubric = { question: 'Q?', expectedAnswer: 'A.', requiredPoints: ['A'], forbiddenPoints: [], sourceEvidence: 'A.', turns: [], expectedFinalMemory: [] };
+  assert.equal(require('node:crypto').createHash('sha256').update(JSON.stringify(scoringMessages('ans', rubric))).digest('hex'), 'b1b94a33a69b95d34940f3658dcb69a997671d1cdfa2c92a596233526c9cfc62');
+  assert.match(scoringMessages('ans', decline)[0].content, /should-decline scenario/); assert.doesNotMatch(scoringMessages('ans', rubric)[0].content, /should-decline/);
+  const inventedDiagnosis = gapDiagnosisForVerdict({ pass: false, missingPoints: ['Says it does not know'], forbiddenClaims: ['Pool open 8-10'] }, decline);
+  assert.deepEqual(inventedDiagnosis.categories, ['Invented an answer instead of declining']); assert.match(inventedDiagnosis.why, /stated details that are not in them/);
+  assert.equal(gapDiagnosisForVerdict({ pass: true }, decline), undefined);
+
+  // Scores: overall is every case; sub-scores only when a run has should-decline cases.
+  const answerResult = score => ({ score, case: { question: 'q' } }); const declineResult = score => ({ score, case: { caseType: 'decline' } });
+  assert.deepEqual(evaluationScores([answerResult(90), answerResult(80), declineResult(20)]), { score: 63, declineScore: 20, answerScore: 85 });
+  assert.deepEqual(evaluationScores([answerResult(90), answerResult(80)]), { score: 85 });
+  assert.deepEqual(evaluationScores([declineResult(100)]), { score: 100, declineScore: 100 });
+
+  // Generation prompt and mapping.
+  const sources = [{ text: 'The hotel has an indoor pool open 6 AM to 10 PM.', sourceUrl: 'https://hotel.example/amenities' }, { text: 'Breakfast costs $20 per adult.' }];
+  const prompt = declineGenerationMessages(2, sources)[1].content;
+  assert.match(prompt, /Create 2 "should decline" test questions/); assert.match(prompt, /no "off-topic" question/); assert.match(declineGenerationMessages(5, sources)[1].content, /exactly one "off-topic" question/);
+  const mapped = declineCases(JSON.stringify({ cases: [{ question: 'Is there a rooftop pool?', declineKind: 'close-but-missing', nearSourceIndex: 1, forbiddenPoints: ['Rooftop pool hours'] }, { question: 'Since breakfast is free, when does it start?', declineKind: 'wrong-assumption', nearSourceIndex: 2 }, { question: 'Who won the 1998 World Cup?', declineKind: 'off-topic', nearSourceIndex: 0 }, { question: '' }] }), sources);
+  assert.equal(mapped.length, 3);
+  assert.equal(mapped[0].sourceEvidence, sources[0].text); assert.equal(mapped[0].sourceUrl, 'https://hotel.example/amenities');
+  assert.deepEqual(mapped[0].forbiddenPoints, ['Invents details that the source documents do not contain', 'Rooftop pool hours']);
+  assert.match(mapped[1].requiredPoints[0], /^Does not accept the question's unsupported assumption/);
+  assert.equal(mapped[2].sourceEvidence, ''); assert.equal(mapped[2].declineKind, 'off-topic');
+
+  // Candidate passages: keyword overlap, plus search vectors when present.
+  const passages = [{ text: 'Valet parking is $32 per night.' }, { text: 'The indoor pool is open 6 AM to 10 PM.' }, { text: 'Pets are not allowed.', vector: [0, 1] }];
+  const [forPool] = declineCandidatePassages(['What time does the rooftop pool open?'], passages);
+  assert.equal(forPool[0].text, 'The indoor pool is open 6 AM to 10 PM.');
+  const [byVector] = declineCandidatePassages(['Can I bring my cat?'], passages, [[0, 1]]);
+  assert.equal(byVector[0].text, 'Pets are not allowed.', 'a vector match is found even with no shared keywords');
+
+  // The check: another source in the same workspace answers one question, so it is dropped; sources without vectors are named.
+  const scope = { orgId: '65f000000000000000000001', agentId: '65f000000000000000000002' };
+  const store = { documents: [{ id: 'doc_a', kind: 'policy', name: 'Amenities.pdf', text: 'The hotel has an indoor pool open 6 AM to 10 PM.', ...scope }, { id: 'doc_b', kind: 'policy', name: 'Rooftop.pdf', text: 'Our rooftop pool opens at 7 AM in summer.', ...scope }, { id: 'doc_other', kind: 'policy', name: 'Other agent.pdf', text: 'Rooftop bar menu.', orgId: scope.orgId, agentId: '65f000000000000000000009' }], technicalDocuments: [], websiteSnapshots: [], chunks: [{ documentId: 'doc_a', text: 'The hotel has an indoor pool open 6 AM to 10 PM.', vector: [1, 0] }] };
+  const control = { id: 'conn_check', model: 'm', baseUrl: 'https://mock-model.example', secret: encrypt('test-key'), judgeSupport: { reasoningEffort: false, temperature: false } };
+  const savedFetch = globalThis.fetch; const calls = [];
+  try {
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body); calls.push({ url: String(url), body });
+      if (String(url).endsWith('/embeddings')) return new Response(JSON.stringify({ data: body.input.map(() => ({ embedding: [1, 0] })) }), { status: 200 });
+      const listing = body.messages[1].content;
+      assert.match(listing, /Rooftop\.pdf/); assert.doesNotMatch(listing, /Other agent\.pdf/, 'only sources for the same agent are checked');
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ results: [{ question: 1, answered: true }, { question: 2, answered: false }] }) } }] }), { status: 200 });
+    };
+    const checked = await checkDeclineCases(store, store.documents[0], control, [normalizeDatasetCase({ ...decline, question: 'When does the rooftop pool open?' }), normalizeDatasetCase({ ...decline, question: 'Do you have a spa?' })]);
+    assert.deepEqual(checked.dropped, ['When does the rooftop pool open?']); assert.deepEqual(checked.kept.map(item => item.question), ['Do you have a spa?']);
+    assert.deepEqual(checked.checkedSources, ['Amenities.pdf', 'Rooftop.pdf']); assert.deepEqual(checked.keywordOnlySources, ['Rooftop.pdf']);
+    assert.equal(calls.filter(call => call.url.endsWith('/chat/completions')).length, 1, 'one judge call per generation');
+    // Without working embeddings every source is keyword-only, and the check still runs.
+    globalThis.fetch = async (url, init) => String(url).endsWith('/embeddings') ? new Response('no embeddings here', { status: 404 }) : new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ results: [] }) } }] }), { status: 200 });
+    const fallback = await checkDeclineCases(store, store.documents[0], control, [decline]);
+    assert.deepEqual(fallback.keywordOnlySources, ['Amenities.pdf', 'Rooftop.pdf']); assert.equal(fallback.kept.length, 1);
+  } finally { globalThis.fetch = savedFetch; }
+}
 const listener = createServer(app);
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const originalFetch = globalThis.fetch;
@@ -675,6 +784,7 @@ try {
     if (String(url).endsWith('/v1/org/list')) return new Response(JSON.stringify({ orgs: [{ id: '65f000000000000000000001', name: 'AI Dev Lab', status: 'active' }, { id: '65f000000000000000000003', name: 'Inactive', status: 'inactive' }, { id: 'bad', name: 'Ignore me', status: 'active' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     if (String(url).endsWith('/v1/agent/list')) return new Response(JSON.stringify({ agents: [{ id: '65f000000000000000000002', name: 'Transit Planner', persona: 'private' }, { id: '65f000000000000000000004', name: 'Another Agent' }, { id: 'bad', name: 'Ignore me' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     if (String(url).endsWith('/v1/livekit/token')) return new Response(JSON.stringify({ token: 'temporary-livekit-token', wsUrl: 'wss://example.livekit.cloud' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).endsWith('/chat/completions')) { const system = JSON.parse(options.body).messages[0].content; const reply = value => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }); if (system.startsWith('You create precise test datasets')) return reply({ cases: [{ question: 'Do riders get a rooftop lounge?', declineKind: 'close-but-missing', nearSourceIndex: 1, forbiddenPoints: ['Lounge hours'] }, { question: 'Can riders request a transit trip plan?', declineKind: 'wrong-assumption', nearSourceIndex: 1 }] }); if (system.startsWith('You check test questions')) return reply({ results: [{ question: 1, answered: false }, { question: 2, answered: true }] }); }
     if (String(url).endsWith('/chat/completions')) { const body = JSON.parse(options.body); const refused = body.model === 'gpt-5.6-terra' && 'temperature' in body ? 'temperature' : body.model === 'oss-model' && 'reasoning_effort' in body ? 'reasoning_effort' : ''; if (refused) return new Response(JSON.stringify({ error: { message: `Unsupported parameter: '${refused}'` } }), { status: 400 }); }
     if (String(url).endsWith('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(JSON.parse(options.body).messages[0].content.startsWith('Judge answers') ? { score: 100, pass: true, missingPoints: [], forbiddenClaims: [], rationale: 'Grounded.' } : { cases: [{ question: 'What can riders request?', expectedAnswer: 'A transit trip plan.', requiredPoints: ['Transit trip plan'], forbiddenPoints: [], sourceIndex: 1 }] }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     throw new Error(`Unexpected request: ${url}`);
@@ -752,6 +862,23 @@ try {
   const judgeBody = JSON.parse(remoteCalls.slice(judgeCallsBefore).find(call => call.url.endsWith('/chat/completions')).options.body);
   assert.equal(judgeBody.reasoning_effort, 'high'); assert.equal('temperature' in judgeBody, false);
   assert.equal((await requestApp(listener, 'DELETE', `/api/connections/${reasoningControl.body.id}`)).status, 204);
+  const mixed = await requestApp(listener, 'POST', '/api/datasets/generate', { documentId: scopedDocument.body.id, connectionId: control.body.id, count: 10, declineShare: 20 });
+  assert.equal(mixed.status, 201);
+  const mixedDeclines = mixed.body.cases.filter(item => item.caseType === 'decline');
+  assert.deepEqual(mixedDeclines.map(item => item.question), ['Do riders get a rooftop lounge?'], 'the question another source answers is dropped');
+  assert.equal(mixed.body.declineCheck.requested, 2); assert.equal(mixed.body.declineCheck.kept, 1); assert.deepEqual(mixed.body.declineCheck.dropped, ['Can riders request a transit trip plan?']);
+  const noDeclines = await requestApp(listener, 'POST', '/api/datasets/generate', { documentId: scopedDocument.body.id, connectionId: control.body.id, count: 10, declineShare: 0 });
+  assert.equal(noDeclines.body.cases.some(item => item.caseType === 'decline'), false); assert.equal(noDeclines.body.declineCheck, undefined);
+  const savedMixed = await requestApp(listener, 'PUT', `/api/datasets/${mixed.body.id}`, { cases: mixed.body.cases.map(item => item.caseType === 'decline' ? { ...item, sourceEvidence: '' } : item) });
+  assert.equal(savedMixed.status, 200); assert.equal(savedMixed.body.cases.find(item => item.caseType === 'decline').declineKind, 'close-but-missing', 'saving a review keeps the case type');
+  assert.equal((await requestApp(listener, 'POST', `/api/datasets/${mixed.body.id}/approve`)).status, 200);
+  const mixedRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: mixed.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: savedMixed.body.cases.map(item => item.caseType === 'decline' ? 'I do not have that information.' : 'Riders can request a transit trip plan from the planner page or by phone.') });
+  assert.equal(mixedRun.status, 201);
+  assert.equal(mixedRun.body.results.find(item => item.case.caseType === 'decline').answerMayBeIncomplete, undefined, 'a short, correct decline is not flagged as incomplete');
+  const fillerRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: mixed.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: savedMixed.body.cases.map(item => item.caseType === 'decline' ? 'One moment please...' : 'Riders can request a transit trip plan from the planner page or by phone.') });
+  assert.equal(fillerRun.body.results.find(item => item.case.caseType === 'decline').answerMayBeIncomplete, true, 'a filler-only reply to a should-decline question is still flagged');
+  assert.equal(typeof mixedRun.body.declineScore, 'number'); assert.equal(typeof mixedRun.body.answerScore, 'number');
+  assert.equal(run.body.declineScore, undefined, 'runs without should-decline cases keep their old shape');
   assert.equal(typeof run.body.results[0].score, 'number');
   const fullRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['One moment please... Riders can request a transit trip plan from the planner page or by phone.'] });
   assert.equal(fullRun.status, 201);
