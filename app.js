@@ -279,6 +279,35 @@ function filterResultScenarios(filter) {
   const first = document.querySelector('.js-result-pick:not([hidden])');
   showResultScenario(current && !current.hidden ? resultScenarioIndex : first ? Number(first.dataset.index) : resultScenarioIndex);
 }
+const REASONING_LABELS = { low: 'Low', medium: 'Medium', high: 'High' };
+// Plain text; callers escape it.
+function judgeSupportLabel(connection) {
+  const support = connection.judgeSupport;
+  if (!support) return 'Grading settings not checked yet';
+  if (!support.reasoningEffort && !support.temperature) return 'Grading: provider defaults — scores may vary more between runs';
+  const reasoning = support.reasoningEffort ? 'reasoning ' + (REASONING_LABELS[connection.reasoningEffort] || 'Medium') : '';
+  return 'Grading: ' + [reasoning, support.temperature ? 'temperature 0' : reasoning ? 'temperature not supported by this model' : ''].filter(Boolean).join(' · ');
+}
+function judgeSettingsLabel(judge) {
+  if (!judge) return 'Judge settings not recorded';
+  return ['Judge: ' + judge.model, judge.reasoningEffort ? 'reasoning ' + (REASONING_LABELS[judge.reasoningEffort] || judge.reasoningEffort) : '', judge.temperature === null || judge.temperature === undefined ? 'temperature not supported' : 'temperature ' + judge.temperature].filter(Boolean).join(' · '); // Plain text; callers escape it.
+}
+// Which judge settings differ between two runs: null when they match, 'not-recorded' when either run lacks them.
+// Item 4's comparison view should reuse this.
+function judgeSettingsDifference(a, b) {
+  if (!a || !b) return 'not-recorded';
+  const differ = ['model', 'host', 'reasoningEffort', 'temperature'].filter(key => (a[key] ?? null) !== (b[key] ?? null));
+  return differ.length ? differ : null;
+}
+function judgeComparisonNote(evaluation, runs) {
+  if (!evaluation.judge) return '';
+  const previous = runs.filter(item => item.datasetId === evaluation.datasetId && item.id !== evaluation.id && item.createdAt < evaluation.createdAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const difference = previous && judgeSettingsDifference(evaluation.judge, previous.judge);
+  if (!difference) return '';
+  const run = `The previous run of this dataset (${new Date(previous.createdAt).toLocaleString()}, ${previous.score}%)`;
+  const text = difference === 'not-recorded' ? `${run} has no recorded judge settings, so a score difference may come from the judge rather than the agent.` : `${run} was graded with different judge settings (${judgeSettingsLabel(previous.judge)}), so a score difference may come from the judge rather than the agent.`;
+  return `<p class="judge-note" role="note">${escapeHtml(text)}</p>`;
+}
 function incompleteAnswerNote(result) { return result.answerMayBeIncomplete ? '<p class="result-incomplete" role="note"><b>Answer may be incomplete.</b> FlexAgent sent only a short or filler-like reply, so this score may reflect a lost answer rather than the agent. Re-run the evaluation before acting on it.</p>' : ''; }
 function results() {
   const visibleRuns = workspace.evaluations.filter(inSelectedWorkspace);
@@ -300,7 +329,7 @@ function results() {
     return `<div class="result-layout"><nav class="panel result-list" aria-label="Scenario results"><div class="result-list-head"><strong>Scenario results</strong><div class="result-filters" role="group" aria-label="Filter scenarios">${filters.map(([key, name, count]) => `<button class="result-filter js-result-filter" data-filter="${key}" type="button" aria-pressed="${key === resultFilter}">${escapeHtml(name)} <span>${count}</span></button>`).join('')}</div></div><div class="result-list-scroll">${list}</div></nav><section class="panel card-pad result-panel"><div class="review-pager"><span id="result-position">Scenario ${resultScenarioIndex + 1} of ${evaluation.results.length}</span><div class="button-row"><button class="button button-secondary button-small js-result-step" data-step="-1" type="button">‹ Previous</button><button class="button button-secondary button-small js-result-step" data-step="1" type="button">Next ›</button></div></div>${evaluation.results.map((result, index) => detail(result, index)).join('')}</section></div>`;
   };
   return `${header('Results', 'Completed evaluations will appear here, with the tested agent’s answer, the expected answer, the score, and the supporting source evidence.', download)}
-    ${latest ? `${picker}<section class="panel card-pad"><h2 class="minor-title">Evaluation: ${escapeHtml(latest.score)}%</h2><p class="page-subtitle">${escapeHtml(label(latest))} · ${new Date(latest.createdAt).toLocaleString()}</p></section>${evaluationSummaryMarkup(latest)}${scenarioResults(latest)}${retrievalPanel}` : `<section class="panel card-pad"><h2 class="minor-title">No results yet</h2><p class="page-subtitle">Once you run an approved golden dataset against your target agent, this area will make every pass, gap, and unsupported claim easy to review.</p></section>`}`;
+    ${latest ? `${picker}<section class="panel card-pad"><h2 class="minor-title">Evaluation: ${escapeHtml(latest.score)}%</h2><p class="page-subtitle">${escapeHtml(label(latest))} · ${new Date(latest.createdAt).toLocaleString()}</p><p class="judge-settings">${escapeHtml(judgeSettingsLabel(latest.judge))}</p>${judgeComparisonNote(latest, visibleRuns)}</section>${evaluationSummaryMarkup(latest)}${scenarioResults(latest)}${retrievalPanel}` : `<section class="panel card-pad"><h2 class="minor-title">No results yet</h2><p class="page-subtitle">Once you run an approved golden dataset against your target agent, this area will make every pass, gap, and unsupported claim easy to review.</p></section>`}`;
 }
 
 // Switches panels in place so unsaved input in other panels is kept.
@@ -314,7 +343,7 @@ function settings() {
   const target = targets.find(connection => connection.id === instructionTargetId) || targets[0];
   const document = workspace.documents.find(item => item.id === instructionDocumentId) || workspace.documents[0];
   const config = document && target && workspace.agentConfigs.find(item => item.documentId === document.id && item.connectionId === target.id);
-  const connections = workspace.connections.length ? `<div class="document-list">${workspace.connections.map(connection => `<div class="document-item"><span class="document-icon">${connection.role === 'target' ? 'AI' : 'QA'}</span><span><strong>${escapeHtml(connection.name)}</strong><small>${connection.role === 'target' ? 'Target agent' : 'Control model'} · ${escapeHtml(connection.model)}</small></span><button class="button button-secondary button-small js-remove-connection" data-id="${escapeHtml(connection.id)}" type="button">Remove</button></div>`).join('')}</div>` : '';
+  const connections = workspace.connections.length ? `<div class="document-list">${workspace.connections.map(connection => `<div class="document-item"><span class="document-icon">${connection.role === 'target' ? 'AI' : 'QA'}</span><span><strong>${escapeHtml(connection.name)}</strong><small>${connection.role === 'target' ? 'Target agent' : 'Control model'} · ${escapeHtml(connection.model)}${connection.role === 'control' ? ` · ${escapeHtml(judgeSupportLabel(connection))}` : ''}</small></span><span class="document-actions">${connection.judgeSupport?.reasoningEffort ? `<label class="reasoning-field" title="Higher reasoning grades more carefully but is slower and costs more."><span>Reasoning</span><select class="js-reasoning" data-id="${escapeHtml(connection.id)}">${Object.entries(REASONING_LABELS).map(([value, name]) => `<option value="${escapeHtml(value)}" ${(connection.reasoningEffort || 'medium') === value ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select></label>` : ''}${connection.role === 'control' ? `<button class="button button-secondary button-small js-check-judge" data-id="${escapeHtml(connection.id)}" type="button">Check model</button>` : ''}<button class="button button-secondary button-small js-remove-connection" data-id="${escapeHtml(connection.id)}" type="button">Remove</button></span></div>`).join('')}</div>` : '';
   const promptForm = target && document ? `<form id="agent-prompt-form" class="form-grid agent-prompt"><div class="field"><label for="instruction-document">Policy document</label><select id="instruction-document">${workspace.documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === document.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="instruction-target">Target agent</label><select id="instruction-target">${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === target.id ? 'selected' : ''}>${escapeHtml(item.name)} · ${escapeHtml(item.model)}</option>`).join('')}</select></div><div class="field full"><label for="agent-system-prompt">Instructions for this policy</label><textarea id="agent-system-prompt" required>${escapeHtml(config?.systemPrompt || target.systemPrompt || 'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.')}</textarea><span class="help">Only used when this policy document is selected in customer chat or evaluation.</span></div><div class="field full form-actions"><button class="button button-secondary" type="submit">Save instructions for this policy</button></div></form>` : '';
   const session = workspace.flexAgentSession;
   const selectedAgent = session?.selectedAgentId;
@@ -422,6 +451,8 @@ function bind(page) {
   document.querySelector('#instruction-document')?.addEventListener('change', event => { instructionDocumentId = event.target.value; render('settings'); });
   document.querySelector('#instruction-target')?.addEventListener('change', event => { instructionTargetId = event.target.value; render('settings'); });
   document.querySelectorAll('.js-remove-connection').forEach(button => button.addEventListener('click', () => removeConnection(button.dataset.id)));
+  document.querySelectorAll('.js-reasoning').forEach(select => select.addEventListener('change', () => setReasoningEffort(select)));
+  document.querySelectorAll('.js-check-judge').forEach(button => button.addEventListener('click', () => checkJudgeModel(button)));
   document.querySelector('#generate-form')?.addEventListener('submit', generateDataset);
   document.querySelector('#dataset-document')?.addEventListener('change', event => { datasetDocumentId = event.target.value; });
   document.querySelectorAll('.js-review-dataset').forEach(button => button.addEventListener('click', () => { reviewingDatasetId = button.dataset.id; render('datasets'); }));
@@ -576,7 +607,7 @@ async function saveOpenAISetup(event) {
   try {
     const response = await fetch('/api/openai-setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); const body = await response.json();
     if (!response.ok) throw new Error(body.error);
-    workspace.connections.push(...body); render('settings'); toast('OpenAI setup saved securely.');
+    workspace.connections.push(...body); render('settings'); const checkError = body.find(connection => connection.judgeCheckError)?.judgeCheckError; toast(checkError ? `OpenAI setup saved. The control model could not be checked yet (${checkError}); it will be checked on its first scoring call.` : 'OpenAI setup saved securely.');
   } catch (error) { toast(error.message || 'OpenAI setup could not be saved. Start the server with npm start.'); }
 }
 
@@ -758,6 +789,24 @@ async function saveAgentPrompt(event) {
   } catch (error) { button.disabled = false; button.textContent = 'Save instructions for this policy'; toast(error.message || 'Instructions could not be saved.'); }
 }
 
+async function checkJudgeModel(button) {
+  button.disabled = true; button.textContent = 'Checking…';
+  try {
+    const response = await fetch(`/api/connections/${button.dataset.id}/check-judge`, { method: 'POST' }); const body = await response.json();
+    if (!response.ok) throw new Error(body.error);
+    workspace.connections = workspace.connections.map(connection => connection.id === body.id ? body : connection); render('settings'); toast(`${body.model}: ${judgeSupportLabel(body)}.`);
+  } catch (error) { button.disabled = false; button.textContent = 'Check model'; toast(error.message || 'The model could not be checked.'); }
+}
+
+async function setReasoningEffort(select) {
+  select.disabled = true;
+  try {
+    const response = await fetch(`/api/connections/${select.dataset.id}/reasoning`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reasoningEffort: select.value }) }); const body = await response.json();
+    if (!response.ok) throw new Error(body.error);
+    workspace.connections = workspace.connections.map(connection => connection.id === body.id ? body : connection); render('settings'); toast(`Reasoning set to ${REASONING_LABELS[body.reasoningEffort]}. New evaluations use it; earlier results keep the level they were graded with.`);
+  } catch (error) { select.disabled = false; toast(error.message || 'Reasoning level could not be saved.'); }
+}
+
 async function removeConnection(id) {
   try {
     const response = await fetch(`/api/connections/${id}`, { method: 'DELETE' });
@@ -880,7 +929,7 @@ function downloadEvaluationReport() {
   const dataset = workspace.datasets.find(item => item.id === evaluation?.datasetId); const source = allDocuments().find(item => item.id === dataset?.documentId);
   if (!evaluation || !dataset) return;
   const result = item => `<article><h2>${escapeHtml(item.case.question)}</h2><p class="verdict ${item.pass ? 'pass' : 'gap'}">${item.pass ? 'PASS' : 'GAP'} · ${escapeHtml(item.score)}%</p>${incompleteAnswerNote(item)}${gapDiagnosisMarkup(item)}<h3>Tested agent’s answer</h3><p>${escapeHtml(item.answer)}</p><h3>Expected answer</h3><p>${escapeHtml(item.case.expectedAnswer)}</p><h3>Source evidence</h3><p>${escapeHtml(item.case.sourceEvidence)}</p>${item.case.sourceUrl ? `<p>${sourceLink(item.case.sourceUrl, ' rel="noreferrer"')}</p>` : ''}<h3>Required points</h3><ul>${(item.case.requiredPoints || []).map(point => `<li>${escapeHtml(point)}</li>`).join('') || '<li>None</li>'}</ul><h3>Forbidden points</h3><ul>${(item.case.forbiddenPoints || []).map(point => `<li>${escapeHtml(point)}</li>`).join('') || '<li>None</li>'}</ul><h3>Rationale</h3><p>${escapeHtml(item.rationale || 'No rationale returned.')}</p></article>`;
-  const report = `<!doctype html><html><head><meta charset="utf-8"><title>Evaluation report</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;color:#182338;line-height:1.5}header,article{border-bottom:1px solid #d8dee8;padding:0 0 24px;margin-bottom:28px}h1{margin-bottom:4px}h2{font-size:18px}h3{font-size:14px;margin-bottom:4px}p{white-space:pre-wrap}.score{font-size:32px;font-weight:700}.verdict{font-weight:700}.pass{color:#087443}.gap{color:#b42318}.evaluation-incomplete{background:#fff7e8;border:1px solid #f0dcb4;padding:12px 16px;margin:0 0 20px}.evaluation-incomplete p{margin:4px 0}.result-incomplete{background:#fff7e8;border-left:3px solid #c98a1b;padding:12px 16px;margin:16px 0}.gap-diagnosis{background:#fff5f2;border-left:3px solid #b42318;padding:12px 16px;margin:16px 0}.gap-diagnosis h3{margin:0 0 8px}.gap-diagnosis p{margin:6px 0}.gap-diagnosis small{color:#684b45}.evaluation-diagnosis{background:#f4f8f6;border:1px solid #d8e7df;padding:20px;margin:0 0 28px;break-inside:avoid}.evaluation-diagnosis h2{margin:5px 0 8px}.evaluation-diagnosis ol{padding-left:22px}.evaluation-diagnosis li{margin:8px 0}.evaluation-diagnosis-counts{display:flex;gap:18px;flex-wrap:wrap;font-size:13px}.evaluation-diagnosis-counts b{font-size:18px}.evaluation-diagnosis-limit{color:#586b66;font-size:12px}@media print{body{margin:20px;max-width:none}article{break-inside:avoid}}</style></head><body><header><h1>Evaluation report</h1><p>${escapeHtml(source?.name || 'Source document')} · ${escapeHtml(new Date(evaluation.createdAt).toLocaleString())}</p><p class="score">${escapeHtml(evaluation.score)}%</p><p>${evaluation.manual ? 'The tested agent’s answers were pasted from a manual test.' : 'The tested agent’s answers were generated through the configured model connection.'}</p></header>${evaluationSummaryMarkup(evaluation)}${evaluation.results.map(result).join('')}</body></html>`;
+  const report = `<!doctype html><html><head><meta charset="utf-8"><title>Evaluation report</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;color:#182338;line-height:1.5}header,article{border-bottom:1px solid #d8dee8;padding:0 0 24px;margin-bottom:28px}h1{margin-bottom:4px}h2{font-size:18px}h3{font-size:14px;margin-bottom:4px}p{white-space:pre-wrap}.score{font-size:32px;font-weight:700}.verdict{font-weight:700}.pass{color:#087443}.gap{color:#b42318}.evaluation-incomplete{background:#fff7e8;border:1px solid #f0dcb4;padding:12px 16px;margin:0 0 20px}.evaluation-incomplete p{margin:4px 0}.result-incomplete{background:#fff7e8;border-left:3px solid #c98a1b;padding:12px 16px;margin:16px 0}.gap-diagnosis{background:#fff5f2;border-left:3px solid #b42318;padding:12px 16px;margin:16px 0}.gap-diagnosis h3{margin:0 0 8px}.gap-diagnosis p{margin:6px 0}.gap-diagnosis small{color:#684b45}.evaluation-diagnosis{background:#f4f8f6;border:1px solid #d8e7df;padding:20px;margin:0 0 28px;break-inside:avoid}.evaluation-diagnosis h2{margin:5px 0 8px}.evaluation-diagnosis ol{padding-left:22px}.evaluation-diagnosis li{margin:8px 0}.evaluation-diagnosis-counts{display:flex;gap:18px;flex-wrap:wrap;font-size:13px}.evaluation-diagnosis-counts b{font-size:18px}.evaluation-diagnosis-limit{color:#586b66;font-size:12px}@media print{body{margin:20px;max-width:none}article{break-inside:avoid}}</style></head><body><header><h1>Evaluation report</h1><p>${escapeHtml(source?.name || 'Source document')} · ${escapeHtml(new Date(evaluation.createdAt).toLocaleString())}</p><p class="score">${escapeHtml(evaluation.score)}%</p><p>${escapeHtml(judgeSettingsLabel(evaluation.judge))}</p><p>${evaluation.manual ? 'The tested agent’s answers were pasted from a manual test.' : 'The tested agent’s answers were generated through the configured model connection.'}</p></header>${evaluationSummaryMarkup(evaluation)}${evaluation.results.map(result).join('')}</body></html>`;
   const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([report], { type: 'text/html' })); link.download = `evaluation-report-${evaluation.createdAt.slice(0, 10)}.html`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 

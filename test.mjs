@@ -9,7 +9,7 @@ const testDataDir = mkdtempSync(path.join(tmpdir(), 'eval-tool-test-'));
 process.env.EVAL_TOOL_DATA_DIR = testDataDir;
 process.env.APP_ENCRYPTION_KEY = 'a'.repeat(64);
 const require = createRequire(import.meta.url);
-const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete } = require('./server.js');
+const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, judgeParams, judgeSettings, checkJudgeSupport, callModel } = require('./server.js');
 const { normalizeWebsiteUrl, isPublicAddress, isInScope, robotsAllows, browserExecutablePath } = require('./website-crawler.js');
 
 const html = readFileSync('index.html', 'utf8');
@@ -389,6 +389,35 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     assert.match(onlyFlagged, /1 answer may be incomplete/); assert.doesNotMatch(onlyFlagged, /<h2>Where to investigate first<\/h2>/);
     assert.equal(evaluationSummaryMarkup({ results: [{ pass: true }] }), '');
   }
+  // Judge settings in results: label, difference check, and the note when the previous run of a dataset was graded differently.
+  {
+    const helpers = js.slice(js.indexOf('const HTML_ESCAPES'), js.indexOf('\n', js.indexOf('function escapeHtml')));
+    const judgeCode = js.slice(js.indexOf('const REASONING_LABELS'), js.indexOf('function incompleteAnswerNote'));
+    const { judgeSettingsLabel, judgeSettingsDifference, judgeComparisonNote, judgeSupportLabel } = new Function(`${helpers}\n${judgeCode}; return { judgeSettingsLabel, judgeSettingsDifference, judgeComparisonNote, judgeSupportLabel };`)();
+    assert.equal(judgeSupportLabel({}), 'Grading settings not checked yet');
+    assert.equal(judgeSupportLabel({ judgeSupport: { reasoningEffort: true, temperature: false }, reasoningEffort: 'medium' }), 'Grading: reasoning Medium · temperature not supported by this model');
+    assert.equal(judgeSupportLabel({ judgeSupport: { reasoningEffort: true, temperature: false }, reasoningEffort: 'high' }), 'Grading: reasoning High · temperature not supported by this model');
+    assert.equal(judgeSupportLabel({ judgeSupport: { reasoningEffort: false, temperature: true } }), 'Grading: temperature 0');
+    assert.equal(judgeSupportLabel({ judgeSupport: { reasoningEffort: true, temperature: true }, reasoningEffort: 'low' }), 'Grading: reasoning Low · temperature 0');
+    assert.equal(judgeSupportLabel({ judgeSupport: { reasoningEffort: false, temperature: false } }), 'Grading: provider defaults — scores may vary more between runs');
+    assert.match(js, /js-check-judge/); assert.match(js, /connection\.judgeSupport\?\.reasoningEffort \?/);
+    const medium = { model: 'gpt-5.6-terra', host: 'api.openai.com', reasoningEffort: 'medium', temperature: null };
+    assert.equal(judgeSettingsLabel(medium), 'Judge: gpt-5.6-terra · reasoning Medium · temperature not supported');
+    assert.equal(judgeSettingsLabel({ model: 'gpt-4.1', host: 'api.openai.com', reasoningEffort: null, temperature: 0 }), 'Judge: gpt-4.1 · temperature 0');
+    assert.equal(judgeSettingsLabel(undefined), 'Judge settings not recorded');
+    assert.equal(judgeSettingsDifference(medium, { ...medium }), null);
+    assert.deepEqual(judgeSettingsDifference(medium, { ...medium, reasoningEffort: 'high' }), ['reasoningEffort']);
+    assert.equal(judgeSettingsDifference(medium, undefined), 'not-recorded');
+    const run = (id, createdAt, judge, datasetId = 'ds1') => ({ id, datasetId, createdAt, score: 80, ...(judge ? { judge } : {}) });
+    const current = run('e3', '2026-09-30T12:00:00Z', medium);
+    assert.match(judgeComparisonNote(current, [current, run('e2', '2026-09-30T10:00:00Z', { ...medium, reasoningEffort: 'high' }), run('e1', '2026-09-29T10:00:00Z', medium)]), /graded with different judge settings \(Judge: gpt-5\.6-terra · reasoning High · temperature not supported\)/);
+    assert.match(judgeComparisonNote(current, [current, run('e1', '2026-09-29T10:00:00Z')]), /has no recorded judge settings/);
+    assert.equal(judgeComparisonNote(current, [current, run('e1', '2026-09-29T10:00:00Z', medium)]), '', 'same settings: no note');
+    assert.equal(judgeComparisonNote(current, [current, run('e0', '2026-09-29T10:00:00Z', undefined, 'other')]), '', 'other datasets are ignored');
+    assert.equal(judgeComparisonNote(current, [current, run('e4', '2026-10-01T10:00:00Z', { ...medium, model: 'gpt-4.1' })]), '', 'only earlier runs count');
+    assert.equal(judgeComparisonNote(run('old', '2026-09-29T12:00:00Z'), [run('older', '2026-09-28T12:00:00Z')]), '', 'runs without settings already say so in the header');
+    assert.match(js, /judgeSettingsLabel\(latest\.judge\)/); assert.match(js, /judgeComparisonNote\(latest, visibleRuns\)/); assert.match(js, /judgeSettingsLabel\(evaluation\.judge\)/);
+  }
   assert.match(js, /incompleteAnswerNote\(result\)/); assert.match(js, /incompleteAnswerNote\(item\)/); assert.match(js, /Answer may be incomplete/); assert.match(css, /\.result-incomplete/);
 }
 
@@ -572,11 +601,67 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   const savedFetch = globalThis.fetch; const sent = [];
   try {
     globalThis.fetch = async (url, init) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ score: 12, pass: false, missingPoints: ['30 days'], forbiddenClaims: [], rationale: 'Did not answer.' }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }); };
-    const verdict = await scoreAnswer({ baseUrl: 'https://mock-model.example', model: 'test-model', secret: encrypt('test-key') }, attack, rubric);
+    const verdict = await scoreAnswer({ baseUrl: 'https://mock-model.example', model: 'test-model', secret: encrypt('test-key'), judgeSupport: { reasoningEffort: false, temperature: true } }, attack, rubric);
     assert.equal(verdict.score, 12); assert.equal(verdict.pass, false); assert.deepEqual(verdict.missingPoints, ['30 days']);
-    assert.equal(sent.length, 1);
+    assert.equal(sent.length, 1); assert.equal(sent[0].temperature, 0);
     assert.ok(sent[0].messages[0].content.includes(UNTRUSTED_SOURCE_NOTICE));
     assert.equal(JSON.parse(sent[0].messages[1].content).answer, attack);
+  } finally { globalThis.fetch = savedFetch; }
+}
+// Judge settings come from test calls against the model, not from its name, so any OpenAI-compatible provider works.
+{
+  const { encrypt } = require('./server.js');
+  assert.equal(server.match(/const evaluation = \{ id: id\('eval'\)[^\n]*judge: judgeSettings\(control\)/g)?.length, 3, 'all three evaluation routes record judge settings');
+  const both = { reasoningEffort: true, temperature: true };
+  assert.deepEqual(judgeParams({ model: 'm', judgeSupport: both }), { reasoning_effort: 'medium', temperature: 0 });
+  assert.deepEqual(judgeParams({ model: 'm', judgeSupport: { reasoningEffort: true, temperature: false }, reasoningEffort: 'high' }), { reasoning_effort: 'high' });
+  assert.deepEqual(judgeParams({ model: 'm', judgeSupport: { reasoningEffort: true, temperature: false }, reasoningEffort: 'max' }), { reasoning_effort: 'medium' });
+  assert.deepEqual(judgeParams({ model: 'm', judgeSupport: { reasoningEffort: false, temperature: true } }), { temperature: 0 });
+  assert.deepEqual(judgeParams({ model: 'm', judgeSupport: { reasoningEffort: false, temperature: false } }), {});
+  assert.deepEqual(judgeSettings({ model: 'gpt-5.6-terra', baseUrl: 'https://api.openai.com/v1', judgeSupport: { reasoningEffort: true, temperature: false }, reasoningEffort: 'low' }), { model: 'gpt-5.6-terra', host: 'api.openai.com', reasoningEffort: 'low', temperature: null });
+  assert.deepEqual(judgeSettings({ model: 'llama-3.3-70b', baseUrl: 'https://api.together.xyz/v1', judgeSupport: { reasoningEffort: false, temperature: true } }), { model: 'llama-3.3-70b', host: 'api.together.xyz', reasoningEffort: null, temperature: 0 });
+
+  const savedFetch = globalThis.fetch; const sent = [];
+  const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const refuse = (status, name) => new Response(JSON.stringify({ error: { message: `Unsupported parameter: '${name}' is not supported with this model.` } }), { status });
+  // Each fake provider decides from the request body, like a real one would.
+  const provider = decide => { globalThis.fetch = async (url, init) => { const body = JSON.parse(init.body); sent.push(body); return decide(body) || ok(); }; };
+  const judge = (id, model) => ({ id, model, baseUrl: 'https://mock-model.example', secret: encrypt('test-key') });
+  const support = async decide => { provider(decide); const { checkedAt, ...result } = await checkJudgeSupport(judge('conn_probe', 'm')); assert.ok(checkedAt); return result; };
+  try {
+    assert.deepEqual(await support(() => null), both, 'accepts everything');
+    assert.deepEqual(await support(body => 'temperature' in body && refuse(400, 'temperature')), { reasoningEffort: true, temperature: false }, 'OpenAI GPT-5 style: reasoning only');
+    assert.deepEqual(await support(body => 'temperature' in body && 'reasoning_effort' in body && refuse(400, 'temperature')), { reasoningEffort: true, temperature: false }, 'each alone but not together: keep the reasoning level');
+    assert.deepEqual(await support(body => 'reasoning_effort' in body && refuse(422, 'reasoning_effort')), { reasoningEffort: false, temperature: true }, 'typical open-source host: temperature only');
+    assert.deepEqual(await support(body => ('reasoning_effort' in body || 'temperature' in body) && refuse(400, 'temperature')), { reasoningEffort: false, temperature: false }, 'accepts neither');
+    sent.length = 0; assert.deepEqual(await support(() => null), both); assert.equal(sent.length, 4, 'plain call, reasoning, temperature, both');
+    sent.length = 0; await support(body => 'reasoning_effort' in body && refuse(400, 'reasoning_effort')); assert.equal(sent.length, 3, 'no combined call when one is refused');
+    provider(() => new Response('{"error":"bad key"}', { status: 401 }));
+    await assert.rejects(checkJudgeSupport(judge('conn_probe', 'm')), /The model check failed: 401/);
+    provider(body => !('reasoning_effort' in body || 'temperature' in body) && new Response('{"error":"no such model"}', { status: 400 }));
+    await assert.rejects(checkJudgeSupport(judge('conn_probe', 'm')), /The model check failed: 400/, 'a model that cannot answer a plain call is an error, not "no settings"');
+
+    // A connection added before the check existed is checked on its first judge call, then the call carries the result.
+    sent.length = 0; provider(body => 'temperature' in body && refuse(400, 'temperature'));
+    const legacy = judge('conn_legacy', 'gpt-5.6-terra');
+    await callModel(legacy, [{ role: 'user', content: 'x' }], true, { judge: true });
+    assert.deepEqual({ reasoningEffort: legacy.judgeSupport.reasoningEffort, temperature: legacy.judgeSupport.temperature }, { reasoningEffort: true, temperature: false });
+    assert.equal(legacy.reasoningEffort, 'medium');
+    assert.equal(sent.length, 4); assert.equal(sent.at(-1).reasoning_effort, 'medium'); assert.equal('temperature' in sent.at(-1), false);
+    await callModel(legacy, [{ role: 'user', content: 'x' }], true);
+    assert.equal('reasoning_effort' in sent.at(-1), false, 'calls that are not judging keep provider defaults');
+
+    // A provider that later refuses a setting it passed the check with: one retry without it, and it stays off.
+    sent.length = 0; provider(body => 'temperature' in body && refuse(400, 'temperature'));
+    const drifted = { ...judge('conn_drifted', 'oss-model'), judgeSupport: { reasoningEffort: false, temperature: true } };
+    await callModel(drifted, [{ role: 'user', content: 'x' }], true, { judge: true });
+    assert.equal(sent.length, 2); assert.equal(sent[0].temperature, 0); assert.equal('temperature' in sent[1], false);
+    assert.equal(drifted.judgeSupport.temperature, false); assert.equal(judgeSettings(drifted).temperature, null);
+
+    // Any other 400 still fails, without a retry.
+    sent.length = 0; provider(() => new Response('{"error":{"message":"Invalid API key"}}', { status: 400 }));
+    await assert.rejects(callModel({ ...judge('conn_plain', 'm'), judgeSupport: both }, [{ role: 'user', content: 'x' }], true, { judge: true }), /Model request failed: 400/);
+    assert.equal(sent.length, 1);
   } finally { globalThis.fetch = savedFetch; }
 }
 const listener = createServer(app);
@@ -590,6 +675,7 @@ try {
     if (String(url).endsWith('/v1/org/list')) return new Response(JSON.stringify({ orgs: [{ id: '65f000000000000000000001', name: 'AI Dev Lab', status: 'active' }, { id: '65f000000000000000000003', name: 'Inactive', status: 'inactive' }, { id: 'bad', name: 'Ignore me', status: 'active' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     if (String(url).endsWith('/v1/agent/list')) return new Response(JSON.stringify({ agents: [{ id: '65f000000000000000000002', name: 'Transit Planner', persona: 'private' }, { id: '65f000000000000000000004', name: 'Another Agent' }, { id: 'bad', name: 'Ignore me' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     if (String(url).endsWith('/v1/livekit/token')) return new Response(JSON.stringify({ token: 'temporary-livekit-token', wsUrl: 'wss://example.livekit.cloud' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).endsWith('/chat/completions')) { const body = JSON.parse(options.body); const refused = body.model === 'gpt-5.6-terra' && 'temperature' in body ? 'temperature' : body.model === 'oss-model' && 'reasoning_effort' in body ? 'reasoning_effort' : ''; if (refused) return new Response(JSON.stringify({ error: { message: `Unsupported parameter: '${refused}'` } }), { status: 400 }); }
     if (String(url).endsWith('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(JSON.parse(options.body).messages[0].content.startsWith('Judge answers') ? { score: 100, pass: true, missingPoints: [], forbiddenClaims: [], rationale: 'Grounded.' } : { cases: [{ question: 'What can riders request?', expectedAnswer: 'A transit trip plan.', requiredPoints: ['Transit trip plan'], forbiddenPoints: [], sourceIndex: 1 }] }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     throw new Error(`Unexpected request: ${url}`);
   };
@@ -639,6 +725,33 @@ try {
   assert.equal(run.status, 201);
   assert.equal(run.body.agentName, 'Transit Planner');
   assert.equal(run.body.results[0].answerMayBeIncomplete, true, 'a very short LiveKit answer is flagged, not silently scored');
+  assert.deepEqual(run.body.judge, { model: 'test-model', host: 'mock-model.example', reasoningEffort: 'medium', temperature: 0 });
+  const manualRun = await requestApp(listener, 'POST', '/api/evaluations/manual', { datasetId: dataset.body.id, controlConnectionId: control.body.id, answers: ['A transit trip plan.'] });
+  assert.equal(manualRun.status, 201); assert.deepEqual(manualRun.body.judge, run.body.judge);
+  assert.equal(control.body.judgeSupport.reasoningEffort, true); assert.equal(control.body.judgeSupport.temperature, true); assert.equal(control.body.secret, undefined);
+  const ossControl = await requestApp(listener, 'POST', '/api/connections', { name: 'Open-source judge', role: 'control', baseUrl: 'https://mock-model.example', model: 'oss-model', apiKey: 'test-key' });
+  assert.equal(ossControl.status, 201); assert.equal(ossControl.body.judgeSupport.reasoningEffort, false); assert.equal(ossControl.body.judgeSupport.temperature, true); assert.equal(ossControl.body.reasoningEffort, undefined);
+  assert.equal((await requestApp(listener, 'PUT', `/api/connections/${ossControl.body.id}/reasoning`, { reasoningEffort: 'high' })).status, 400);
+  const ossRun = await requestApp(listener, 'POST', '/api/evaluations/manual', { datasetId: dataset.body.id, controlConnectionId: ossControl.body.id, answers: ['A transit trip plan.'] });
+  assert.deepEqual(ossRun.body.judge, { model: 'oss-model', host: 'mock-model.example', reasoningEffort: null, temperature: 0 });
+  assert.equal((await requestApp(listener, 'DELETE', `/api/connections/${ossControl.body.id}`)).status, 204);
+  const reasoningControl = await requestApp(listener, 'POST', '/api/connections', { name: 'Reasoning judge', role: 'control', baseUrl: 'https://mock-model.example', model: 'gpt-5.6-terra', apiKey: 'test-key' });
+  assert.equal(reasoningControl.body.reasoningEffort, 'medium'); assert.equal(reasoningControl.body.judgeSupport.reasoningEffort, true); assert.equal(reasoningControl.body.judgeSupport.temperature, false);
+  const saved = JSON.parse(readFileSync(path.join(testDataDir, 'store.json'), 'utf8')).connections.find(item => item.id === reasoningControl.body.id);
+  assert.equal(saved.judgeSupport.temperature, false, 'the check result is saved, so it survives a restart');
+  const rechecked = await requestApp(listener, 'POST', `/api/connections/${reasoningControl.body.id}/check-judge`);
+  assert.equal(rechecked.status, 200); assert.equal(rechecked.body.judgeSupport.reasoningEffort, true); assert.equal(rechecked.body.reasoningEffort, 'medium');
+  assert.equal((await requestApp(listener, 'POST', `/api/connections/${control.body.id.replace(/.$/, 'x')}/check-judge`)).status, 404);
+  const raised = await requestApp(listener, 'PUT', `/api/connections/${reasoningControl.body.id}/reasoning`, { reasoningEffort: 'high' });
+  assert.equal(raised.status, 200); assert.equal(raised.body.reasoningEffort, 'high');
+  assert.equal((await requestApp(listener, 'PUT', `/api/connections/${reasoningControl.body.id}/reasoning`, { reasoningEffort: 'max' })).status, 400);
+  const judgeCallsBefore = remoteCalls.length;
+  const reasoningRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: reasoningControl.body.id, answers: ['A transit trip plan.'] });
+  assert.equal(reasoningRun.status, 201);
+  assert.deepEqual(reasoningRun.body.judge, { model: 'gpt-5.6-terra', host: 'mock-model.example', reasoningEffort: 'high', temperature: null });
+  const judgeBody = JSON.parse(remoteCalls.slice(judgeCallsBefore).find(call => call.url.endsWith('/chat/completions')).options.body);
+  assert.equal(judgeBody.reasoning_effort, 'high'); assert.equal('temperature' in judgeBody, false);
+  assert.equal((await requestApp(listener, 'DELETE', `/api/connections/${reasoningControl.body.id}`)).status, 204);
   assert.equal(typeof run.body.results[0].score, 'number');
   const fullRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['One moment please... Riders can request a transit trip plan from the planner page or by phone.'] });
   assert.equal(fullRun.status, 201);

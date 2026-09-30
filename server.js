@@ -101,6 +101,42 @@ function decrypt(secret) {
   return Buffer.concat([decipher.update(Buffer.from(secret.tag, 'base64')), decipher.final()]).toString('utf8');
 }
 function publicConnection(connection) { const { secret, ...safe } = connection; return safe; }
+// Judge calls are pinned so a score changes only when the answer does. What each judge model accepts is tested
+// when it is added (checkJudgeSupport), not guessed from its name, so any OpenAI-compatible provider works.
+const REASONING_EFFORTS = ['low', 'medium', 'high'];
+const DEFAULT_REASONING_EFFORT = 'medium';
+function judgeParams(connection) {
+  const support = connection.judgeSupport || {};
+  return { ...(support.reasoningEffort ? { reasoning_effort: REASONING_EFFORTS.includes(connection.reasoningEffort) ? connection.reasoningEffort : DEFAULT_REASONING_EFFORT } : {}), ...(support.temperature ? { temperature: 0 } : {}) };
+}
+// What a run records about its judge, so runs graded differently can be told apart after the connection changes.
+function judgeSettings(connection) {
+  const params = judgeParams(connection); let host = ''; try { host = new URL(connection.baseUrl).host; } catch {}
+  return { model: connection.model, host, reasoningEffort: params.reasoning_effort || null, temperature: params.temperature ?? null };
+}
+// Tiny test calls: a plain one (the model must answer at all), then a reasoning level, temperature 0, and both together.
+// A 400 or 422 means the provider refused that setting. Some providers silently ignore settings instead; no test can see that.
+async function checkJudgeSupport(connection) {
+  const base = connection.baseUrl.replace(/\/$/, '');
+  const accepts = async (extra, required = false) => {
+    const response = await safeFetch(`${base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(connection.secret)}` }, body: JSON.stringify({ model: connection.model, messages: [{ role: 'user', content: 'Reply with OK.' }], ...extra }) });
+    if (response.ok) return true;
+    const error = await response.text();
+    if (!required && [400, 422].includes(response.status)) return false;
+    throw new Error(`The model check failed: ${response.status} ${error.slice(0, 300)}`);
+  };
+  await accepts({}, true);
+  const reasoningEffort = await accepts({ reasoning_effort: 'low' }); const temperature = await accepts({ temperature: 0 });
+  const together = reasoningEffort && temperature ? await accepts({ reasoning_effort: 'low', temperature: 0 }) : true;
+  return { reasoningEffort, temperature: temperature && together, checkedAt: new Date().toISOString() };
+}
+// Saves what the judge accepts on the connection (and on the object in use), so it survives a restart.
+function saveJudgeSupport(connection, judgeSupport) {
+  connection.judgeSupport = judgeSupport;
+  if (judgeSupport.reasoningEffort && !REASONING_EFFORTS.includes(connection.reasoningEffort)) connection.reasoningEffort = DEFAULT_REASONING_EFFORT;
+  const store = readStore(); const saved = store.connections.find(item => item.id === connection.id);
+  if (saved) { saved.judgeSupport = connection.judgeSupport; if (connection.reasoningEffort) saved.reasoningEffort = connection.reasoningEffort; saveStore(store); }
+}
 function publicFlexAgentSession(session) {
   if (!session) return null;
   const { accessToken, ...safe } = session;
@@ -192,7 +228,7 @@ function scoringMessages(answer, rubric) {
 }
 async function scoreAnswer(control, answer, rubric) {
   const messages = scoringMessages(answer, rubric);
-  const verdict = parseScoredVerdict(await callModel(control, messages, true));
+  const verdict = parseScoredVerdict(await callModel(control, messages, true, { judge: true }));
   return { ...verdict, ...(!verdict.pass ? { gapDiagnosis: gapDiagnosisForVerdict(verdict, rubric) } : {}) };
 }
 function multiTurnGapDiagnosis(turnResults, memoryVerdict) {
@@ -212,12 +248,19 @@ async function extractText(file) {
   if (extension === '.txt') return file.buffer.toString('utf8');
   throw new Error('Only PDF, DOCX, and TXT files are supported.');
 }
-async function callModel(connection, messages, json = false) {
+async function callModel(connection, messages, json = false, { judge = false } = {}) {
   const base = connection.baseUrl.replace(/\/$/, '');
-  const response = await safeFetch(`${base}/chat/completions`, {
+  if (judge && !connection.judgeSupport) saveJudgeSupport(connection, await checkJudgeSupport(connection)); // Connections added before the check existed.
+  const send = () => safeFetch(`${base}/chat/completions`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(connection.secret)}` },
-    body: JSON.stringify({ model: connection.model, messages, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
+    body: JSON.stringify({ model: connection.model, messages, ...(json ? { response_format: { type: 'json_object' } } : {}), ...(judge ? judgeParams(connection) : {}) }),
   });
+  let response = await send();
+  if (!response.ok && judge && response.status === 400) {
+    const error = await response.text(); const refused = Object.keys(judgeParams(connection)).find(name => error.includes(name));
+    if (!refused) throw new Error(`Model request failed: ${response.status} ${error}`);
+    saveJudgeSupport(connection, { ...connection.judgeSupport, [refused === 'reasoning_effort' ? 'reasoningEffort' : 'temperature']: false }); response = await send();
+  }
   if (!response.ok) throw new Error(`Model request failed: ${response.status} ${await response.text()}`);
   const body = await response.json();
   return body.choices?.[0]?.message?.content || '';
@@ -256,7 +299,7 @@ async function analyzeTechnicalDocument(control, text) {
   return parseTechnicalAnalysis(await callModel(control, technicalAnalysisMessages(text), true), text);
 }
 async function extractSurveyFacts(control, chat) {
-  const raw = await callModel(control, [{ role: 'system', content: 'Extract only new, source-grounded survey facts. Return JSON only: {"facts":[{"kind":"explicit|inferred","value":"","sourceMessageId":"","status":"active|superseded|unresolved","supersedes":"optional memory ID"}]}. Never invent a source message ID. Mark user statements explicit; mark conclusions inferred.' }, { role: 'user', content: JSON.stringify({ messages: chat.messages, existingFacts: chat.surveyMemory?.facts || [] }) }], true);
+  const raw = await callModel(control, [{ role: 'system', content: 'Extract only new, source-grounded survey facts. Return JSON only: {"facts":[{"kind":"explicit|inferred","value":"","sourceMessageId":"","status":"active|superseded|unresolved","supersedes":"optional memory ID"}]}. Never invent a source message ID. Mark user statements explicit; mark conclusions inferred.' }, { role: 'user', content: JSON.stringify({ messages: chat.messages, existingFacts: chat.surveyMemory?.facts || [] }) }], true, { judge: true });
   return parseSurveyFacts(raw);
 }
 function flexAgentRequest(target, question) {
@@ -501,12 +544,16 @@ app.use(express.json({ limit: '1mb' }));
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')));
 for (const [route, file] of [['/', 'index.html'], ['/index.html', 'index.html'], ['/app.js', 'app.js'], ['/styles.css', 'styles.css'], ['/verity-logo.svg', 'verity-logo.svg']]) app.get(route, (req, res) => res.sendFile(path.join(root, file)));
 app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), flexAgentSession: publicFlexAgentSession(store.flexAgentSession), datasets: store.datasets, evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
-app.post('/api/connections', (req, res) => {
+app.post('/api/connections', async (req, res) => {
   const { name, role, baseUrl, model, apiKey } = req.body;
   if (![name, role, baseUrl, model, apiKey].every(Boolean) || !['target', 'control'].includes(role)) return res.status(400).json({ error: 'Name, role, base URL, model, and API key are required.' });
   let url; try { url = assertPublicHttpsUrl(baseUrl, 'Base URL'); } catch (error) { return res.status(400).json({ error: error.message }); }
   const store = readStore(); const connection = { id: id('conn'), name, role, baseUrl: url.toString().replace(/\/$/, ''), model, createdAt: new Date().toISOString(), secret: encrypt(apiKey) };
-  store.connections.push(connection); saveStore(store); res.status(201).json(publicConnection(connection));
+  store.connections.push(connection); saveStore(store);
+  // A control model is tested right away; if that fails it is still saved and tested again on its first judge call.
+  let judgeCheckError;
+  if (role === 'control') { try { saveJudgeSupport(connection, await checkJudgeSupport(connection)); } catch (error) { judgeCheckError = error.message; } }
+  res.status(201).json({ ...publicConnection(connection), ...(judgeCheckError ? { judgeCheckError } : {}) });
 });
 app.post('/api/flexagent-target', (req, res) => {
   const { name = 'FlexAgent target', baseUrl, serviceToken, orgId, agentId, mode = 'api', parentOrigin } = req.body;
@@ -598,7 +645,7 @@ app.post('/api/openai-setup', (req, res) => {
   Promise.all([...new Set([targetModel, controlModel])].map(async model => {
     const response = await safeFetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
     if (!response.ok) throw new Error(`OpenAI could not verify model “${model}”. Check the model name and API key.`);
-  })).then(() => {
+  })).then(async () => {
     const store = readStore();
     const previousTarget = store.connections.find(connection => connection.name === 'Target agent');
     store.connections = store.connections.filter(connection => !['Target agent', 'Control model'].includes(connection.name));
@@ -607,7 +654,9 @@ app.post('/api/openai-setup', (req, res) => {
       { id: id('conn'), name: 'Target agent', role: 'target', baseUrl: 'https://api.openai.com/v1', model: targetModel, systemPrompt: previousTarget?.systemPrompt || DEFAULT_TARGET_PROMPT, createdAt: new Date().toISOString(), secret },
       { id: id('conn'), name: 'Control model', role: 'control', baseUrl: 'https://api.openai.com/v1', model: controlModel, createdAt: new Date().toISOString(), secret },
     ];
-    store.connections.push(...connections); saveStore(store); res.status(201).json(connections.map(publicConnection));
+    store.connections.push(...connections); saveStore(store);
+    let judgeCheckError; try { saveJudgeSupport(connections[1], await checkJudgeSupport(connections[1])); } catch (error) { judgeCheckError = error.message; }
+    res.status(201).json(connections.map(connection => ({ ...publicConnection(connection), ...(connection.role === 'control' && judgeCheckError ? { judgeCheckError } : {}) })));
   }).catch(error => res.status(400).json({ error: error.message }));
 });
 app.delete('/api/connections/:id', (req, res) => {
@@ -620,6 +669,20 @@ app.delete('/api/connections/:id', (req, res) => {
     delete store.flexAgentSession.selectedAgentName;
   }
   saveStore(store); res.status(204).end();
+});
+app.post('/api/connections/:id/check-judge', async (req, res, next) => {
+  try {
+    const connection = readStore().connections.find(item => item.id === req.params.id && item.role === 'control');
+    if (!connection) return res.status(404).json({ error: 'Control model not found.' });
+    saveJudgeSupport(connection, await checkJudgeSupport(connection)); res.json(publicConnection(connection));
+  } catch (error) { next(error); }
+});
+app.put('/api/connections/:id/reasoning', (req, res) => {
+  const store = readStore(); const connection = store.connections.find(item => item.id === req.params.id && item.role === 'control');
+  if (!connection) return res.status(404).json({ error: 'Control model not found.' });
+  if (!connection.judgeSupport?.reasoningEffort) return res.status(400).json({ error: 'This model does not take a reasoning level.' });
+  if (!REASONING_EFFORTS.includes(req.body.reasoningEffort)) return res.status(400).json({ error: 'Choose Low, Medium, or High.' });
+  connection.reasoningEffort = req.body.reasoningEffort; connection.updatedAt = new Date().toISOString(); saveStore(store); res.json(publicConnection(connection));
 });
 app.put('/api/connections/:id/prompt', (req, res) => {
   const store = readStore(); const connection = store.connections.find(item => item.id === req.params.id && item.role === 'target');
@@ -857,7 +920,7 @@ app.post('/api/evaluations', async (req, res, next) => {
       }
       const verdict = await scoreAnswer(control, answer, item); results.push({ case: item, answer, retrievedChunks: retrieved.map(({ vector, ...chunk }) => chunk), retrievalUnavailable: flexAgent, ...verdict });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), targetConnectionId, controlConnectionId, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), targetConnectionId, controlConnectionId, judge: judgeSettings(control), createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
@@ -875,7 +938,7 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
       const verdict = await scoreAnswer(control, answer, item);
       results.push({ case: item, answer, manual: true, retrievedChunks: [], retrievalUnavailable: true, ...verdict });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId: null, controlConnectionId, manual: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId: null, controlConnectionId, judge: judgeSettings(control), manual: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
@@ -899,10 +962,10 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
       const answer = String(answers[index]).trim();
       results.push({ case: item, answer, livekit: true, retrievedChunks: [], retrievalUnavailable: true, ...(answerLooksIncomplete(answer) ? { answerMayBeIncomplete: true } : {}), ...(await scoreAnswer(control, answer, item)) });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId, controlConnectionId, livekit: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId, controlConnectionId, judge: judgeSettings(control), livekit: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
 app.use((error, req, res, next) => { if (error.status) res.status(error.status); else res.status(400); res.json({ error: error.message || 'Request failed.' }); });
 if (require.main === module) app.listen(Number(process.env.PORT || 4173), '127.0.0.1', () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete };
+module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, judgeParams, judgeSettings, checkJudgeSupport, callModel };
