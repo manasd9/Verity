@@ -531,10 +531,65 @@ async function ensureTechnicalIndexed(store, document, control) {
 }
 function policyContext(chunks) { return chunks.map((item, index) => `[Policy section ${index + 1}]\n${item.text}`).join('\n\n'); }
 
-function datasetGenerationMessages({ count, caseType, website, technical }, sources) {
-  const prompt = `Create ${Math.min(Math.max(Number(count), 1), 30)} ${caseType} from the numbered source passages below. Return JSON only: {"cases":[{"question":"","expectedAnswer":"","requiredPoints":[""],"forbiddenPoints":[""],"sourceIndex":1}]}. For every case, sourceIndex must be the number of the passage that supports its expected answer. ${website ? 'Questions must be realistic customer questions and expected answers must be direct, source-supported replies.' : technical ? 'Ask about documented APIs, inputs, outputs, branches, constraints, or unsupported details; expected answers must not invent facts.' : 'Questions must be realistic customer messages and expected answers must be direct customer-ready replies.'}\n\n${fenceUntrusted('SOURCE PASSAGES', sources.map((source, index) => `SOURCE ${index + 1}${source.sourceUrl ? ` (${source.sourceUrl})` : ''}:\n${source.text}`).join('\n\n'))}`;
+function datasetGenerationMessages({ count, caseType, website, technical, sections }, sources) {
+  // Section titles come from the document, so they stay inside the fence; the spreading instruction is generic.
+  const spread = sections ? ' Spread the cases across the sections named in the passage labels: give each section worth testing one case before any section gets a second. When there are fewer cases than sections, skip sections that only repeat or summarize others, such as reference tables or example scenarios.' : '';
+  const prompt = `Create ${Math.min(Math.max(Number(count), 1), 30)} ${caseType} from the numbered source passages below. Return JSON only: {"cases":[{"question":"","expectedAnswer":"","requiredPoints":[""],"forbiddenPoints":[""],"sourceIndex":1}]}. For every case, sourceIndex must be the number of the passage that supports its expected answer. ${website ? 'Questions must be realistic customer questions and expected answers must be direct, source-supported replies.' : technical ? 'Ask about documented APIs, inputs, outputs, branches, constraints, or unsupported details; expected answers must not invent facts.' : 'Questions must be realistic customer messages and expected answers must be direct customer-ready replies.'}${spread}\n\n${fenceUntrusted('SOURCE PASSAGES', sources.map((source, index) => `SOURCE ${index + 1}${source.sourceUrl ? ` (${source.sourceUrl})` : ''}${sections?.[index] ? ` [section: ${sections[index]}]` : ''}:\n${source.text}`).join('\n\n'))}`;
   return [{ role: 'system', content: `You create precise, source-grounded datasets for testing agents. ${UNTRUSTED_SOURCE_NOTICE}` }, { role: 'user', content: prompt }];
 }
+// Coverage: which parts of a source have questions. Documents split at numbered headings ("7.3 Check out"),
+// websites by page, and text without headings into parts of about 1,500 characters.
+const TOPIC_HEADING = /^(\d{1,2}(?:\.\d{1,2})*)\.?\s+([A-Z][^\n]{2,80})$/;
+function sourceTopics(source) {
+  if (source.kind === 'website') return (source.pages || []).map(page => ({ title: page.title || page.url, url: page.url, text: page.text || '' }));
+  const text = String(source.text || ''); const headings = []; let offset = 0;
+  for (const line of text.split('\n')) { const title = line.trim(); if (TOPIC_HEADING.test(title) && !/[;$]|[.:,]$/.test(title)) headings.push({ title, start: offset }); offset += line.length + 1; }
+  if (headings.length >= 2) {
+    // Sections cover the whole text: the title page and anything before the first heading belong to the first section.
+    const spans = headings.map((item, index) => ({ title: item.title, start: index ? item.start : 0, end: headings[index + 1]?.start ?? text.length }));
+    // A heading with almost nothing under it (a section title right before its first subsection) joins the next one.
+    const merged = []; for (const span of spans) { const last = merged.at(-1); if (last && last.end - last.start < 200) { last.end = span.end; last.title = `${last.title} / ${span.title}`; } else merged.push({ ...span }); }
+    return merged.map(span => ({ title: span.title, text: text.slice(span.start, span.end) }));
+  }
+  const parts = []; for (let start = 0; start < text.length; start += 1500) { const part = text.slice(start, start + 1500); parts.push({ title: `Part ${parts.length + 1}: ${part.trim().split(/\s+/).slice(0, 6).join(' ')}…`, text: part }); }
+  return parts;
+}
+const squash = text => String(text || '').replace(/\s+/g, ' ');
+// Finds the section a question tests: where its evidence sits in the source, and, when that passage spans
+// several sections, the one whose text best matches the question and its rubric.
+function coverageSection(topics, fullText, item) {
+  const evidence = squash(item.sourceEvidence || item.turns?.[0]?.sourceEvidence).trim(); if (!evidence) return -1;
+  let at = fullText.indexOf(evidence); let length = evidence.length;
+  if (at < 0) { at = fullText.indexOf(evidence.slice(0, 120)); length = Math.min(120, evidence.length); }
+  if (at < 0) return -1;
+  const touched = topics.map((topic, index) => ({ index, overlap: Math.min(topic.end, at + length) - Math.max(topic.start, at) })).filter(entry => entry.overlap > 0);
+  if (touched.length < 2) return touched[0]?.index ?? -1;
+  const terms = keywords([item.question, item.expectedAnswer, ...(item.requiredPoints || [])].join(' '));
+  const fit = entry => terms.filter(term => topics[entry.index].words.has(term)).length;
+  return touched.sort((a, b) => fit(b) - fit(a) || b.overlap - a.overlap)[0].index;
+}
+function datasetCoverage(store, dataset) {
+  const source = resolveDocument(store, dataset.documentId); if (!source) return null;
+  let position = 0;
+  const topics = sourceTopics(source).map(topic => { const text = squash(topic.text); const entry = { title: topic.title, url: topic.url, start: position, end: position + text.length, words: new Set(keywords(text)), cases: [] }; position += text.length; return entry; });
+  const fullText = topics.length ? sourceTopics(source).map(topic => squash(topic.text)).join('') : '';
+  const unmatched = [];
+  dataset.cases.forEach((item, index) => {
+    if (item.caseType === 'decline') return; // a should-decline question does not test any section
+    const found = source.kind === 'website' ? topics.findIndex(topic => topic.url === item.sourceUrl) : coverageSection(topics, fullText, item);
+    if (found >= 0) topics[found].cases.push(index + 1); else unmatched.push(index + 1);
+  });
+  return { sections: topics.map(({ title, cases }) => ({ title, cases })), covered: topics.filter(topic => topic.cases.length).length, total: topics.length, unmatched, unit: source.kind === 'website' ? 'pages' : 'sections' };
+}
+// The section each generation passage starts in, so the generator can spread questions across the source.
+function passageSections(source, passages) {
+  if (source.kind === 'website') return null;
+  const topics = sourceTopics(source); if (topics.length < 2) return null;
+  let position = 0; const ranges = topics.map(topic => { const length = squash(topic.text).length; const range = { title: topic.title, start: position, end: position + length }; position += length; return range; });
+  const fullText = topics.map(topic => squash(topic.text)).join(''); let from = 0;
+  return passages.map(passage => { const at = fullText.indexOf(squash(passage.text).trim().slice(0, 120), from); if (at < 0) return null; from = at; return ranges.find(range => at >= range.start && at < range.end)?.title || null; });
+}
+function publicDataset(store, dataset) { return { ...dataset, coverage: datasetCoverage(store, dataset) }; }
 function declineGenerationMessages(count, sources) {
   const prompt = `Create ${count} "should decline" test questions for a customer-facing agent whose only knowledge is the numbered source passages below. Each must read like a realistic customer message whose answer is NOT in any passage, so a well-behaved agent should say it does not have that information or offer to connect the customer with staff. Never write a question that any passage answers, even partly. Kinds: "close-but-missing" for most of them (the passages cover the topic but not this specific detail; set nearSourceIndex to the passage that covers the topic); "wrong-assumption" for some (the question assumes a fact the passages do not state; set nearSourceIndex to the closest passage, or 0); ${count >= 5 ? 'exactly one' : 'no'} "off-topic" question (unrelated to this business; nearSourceIndex 0). In forbiddenPoints name the specific details the agent must not invent. Return JSON only: {"cases":[{"question":"","declineKind":"close-but-missing","nearSourceIndex":1,"forbiddenPoints":[""]}]}\n\n${fenceUntrusted('SOURCE PASSAGES', sources.map((source, index) => `SOURCE ${index + 1}${source.sourceUrl ? ` (${source.sourceUrl})` : ''}:\n${source.text}`).join('\n\n'))}`;
   return [{ role: 'system', content: `You create precise test datasets for agents. ${UNTRUSTED_SOURCE_NOTICE}` }, { role: 'user', content: prompt }];
@@ -605,7 +660,7 @@ app.use(localRequestGuard);
 app.use(express.json({ limit: '1mb' }));
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')));
 for (const [route, file] of [['/', 'index.html'], ['/index.html', 'index.html'], ['/app.js', 'app.js'], ['/styles.css', 'styles.css'], ['/verity-logo.svg', 'verity-logo.svg']]) app.get(route, (req, res) => res.sendFile(path.join(root, file)));
-app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), flexAgentSession: publicFlexAgentSession(store.flexAgentSession), datasets: store.datasets, evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
+app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), flexAgentSession: publicFlexAgentSession(store.flexAgentSession), datasets: store.datasets.map(dataset => publicDataset(store, dataset)), evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
 app.post('/api/connections', async (req, res) => {
   const { name, role, baseUrl, model, apiKey } = req.body;
   if (![name, role, baseUrl, model, apiKey].every(Boolean) || !['target', 'control'].includes(role)) return res.status(400).json({ error: 'Name, role, base URL, model, and API key are required.' });
@@ -897,7 +952,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const sources = website ? sourcePassages(document).slice(0, 120) : sourcePassages(document);
     const total = Math.min(Math.max(Math.round(Number(count)) || 10, 1), 30); const share = Math.min(Math.max(Number(declineShare) || 0, 0), 50);
     const declineCount = share ? Math.min(Math.max(Math.round(total * share / 100), 1), total - 1) : 0;
-    const raw = await callModel(connection, datasetGenerationMessages({ count: total - declineCount, caseType, website, technical }, sources), true);
+    const raw = await callModel(connection, datasetGenerationMessages({ count: total - declineCount, caseType, website, technical, sections: passageSections(document, sources) }, sources), true);
     const answerCases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!answerCases.length) throw new Error('The control model did not cite any valid source passages. Please try again.');
     let declineCheck; let declines = [];
@@ -913,7 +968,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const latest = readStore();
     const latestSource = resolveDocument(latest, documentId);
     if (!latestSource || !sameScope(latestSource, document)) throw new Error('The source changed while generating the dataset. Try again.');
-    latest.datasets.push(dataset); saveStore(latest); res.status(201).json(dataset);
+    latest.datasets.push(dataset); saveStore(latest); res.status(201).json(publicDataset(latest, dataset));
   } catch (error) { next(error); }
 });
 app.put('/api/datasets/:id', (req, res) => {
@@ -924,14 +979,14 @@ app.put('/api/datasets/:id', (req, res) => {
   if (!Array.isArray(req.body.cases) || !req.body.cases.length) return res.status(400).json({ error: 'At least one scenario is required.' });
   const source = resolveDocument(store, dataset.documentId); if (!source) return res.status(400).json({ error: 'The source for this dataset is unavailable.' });
   dataset.cases = validateWebsiteCases(source, req.body.cases.map(normalizeDatasetCase));
-  dataset.updatedAt = new Date().toISOString(); saveStore(store); res.json(dataset);
+  dataset.updatedAt = new Date().toISOString(); saveStore(store); res.json(publicDataset(store, dataset));
 });
 app.post('/api/datasets/:id/approve', (req, res) => {
   const store = readStore(); const dataset = store.datasets.find(item => item.id === req.params.id);
   if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
   if (recordScope(dataset)) requestedScope(store, dataset);
   if (!dataset.cases.length) return res.status(400).json({ error: 'Every approved dataset needs at least one scenario.' });
-  dataset.status = 'approved'; dataset.approvedAt = new Date().toISOString(); saveStore(store); res.json(dataset);
+  dataset.status = 'approved'; dataset.approvedAt = new Date().toISOString(); saveStore(store); res.json(publicDataset(store, dataset));
 });
 app.post('/api/evaluations', async (req, res, next) => {
   try {
@@ -1048,4 +1103,4 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
 });
 app.use((error, req, res, next) => { if (error.status) res.status(error.status); else res.status(400); res.json({ error: error.message || 'Request failed.' }); });
 if (require.main === module) app.listen(Number(process.env.PORT || 4173), '127.0.0.1', () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, answerIsOnlyFiller, judgeParams, judgeSettings, checkJudgeSupport, callModel, declineGenerationMessages, declineCases, declineCandidatePassages, checkDeclineCases, evaluationScores, scopedSources };
+module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, answerIsOnlyFiller, judgeParams, judgeSettings, checkJudgeSupport, callModel, declineGenerationMessages, declineCases, declineCandidatePassages, checkDeclineCases, evaluationScores, scopedSources, sourceTopics, datasetCoverage, passageSections };

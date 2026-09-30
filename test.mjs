@@ -409,6 +409,18 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     delete fields.caseType; delete fields.declineKind;
     assert.equal('caseType' in reviewedCases(form, { cases: [{}] })[0], false);
   }
+  {
+    const coverageCode = js.slice(js.indexOf('function coverageMarkup'), js.indexOf('function declineCheckNote'));
+    const { coverageMarkup } = new Function(`${helpers}\n${coverageCode}; return { coverageMarkup };`)();
+    const sections = Array.from({ length: 9 }, (_, index) => ({ title: `${index + 1} Section <${index + 1}>`, cases: index < 2 ? [index + 1] : [] }));
+    const markup = coverageMarkup({ sections, covered: 2, total: 9, unmatched: [7], unit: 'sections' });
+    assert.match(markup, /Covered 2 of 9 sections\./);
+    assert.match(markup, /No questions yet: 3 Section &lt;3&gt;; 4 Section &lt;4&gt;; 5 Section &lt;5&gt;; 6 Section &lt;6&gt;; 7 Section &lt;7&gt;; 8 Section &lt;8&gt;, and 1 more\./);
+    assert.match(markup, /#7 could not be matched to a section/); assert.doesNotMatch(markup, /<3>/, 'titles are escaped');
+    assert.match(coverageMarkup({ sections: [{ title: 'Home', cases: [1] }], covered: 1, total: 1, unmatched: [], unit: 'pages' }), /Covered 1 of 1 page\.<\/b> Every page has at least one question\./);
+    assert.equal(coverageMarkup(null), ''); assert.equal(coverageMarkup({ sections: [], covered: 0, total: 0, unmatched: [] }), '');
+    assert.match(js, /\$\{coverageMarkup\(dataset\.coverage\)\}/); assert.match(js, /coverageMarkup\(workspace\.datasets\.find\(item => item\.id === latest\.datasetId\)\?\.coverage\)/);
+  }
   // Should-decline cases: their own summary line, left out of the retrieval diagnosis, and sub-scores in the header.
     const declineCase = { caseType: 'decline', declineKind: 'close-but-missing', question: 'Rooftop pool?' };
     const withDeclines = evaluationSummaryMarkup({ results: [{ ...miss, case: { question: 'a' } }, { ...miss, case: { question: 'b' } }, { pass: false, case: declineCase, answer: 'Yes, open 8-10.' }, { pass: true, case: declineCase, answer: 'I do not have that information.' }] });
@@ -620,6 +632,23 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   assert.ok(generation.before.startsWith('Create 5 customer-facing policy evaluation cases from the numbered source passages below. Return JSON only: {"cases":[{"question":"","expectedAnswer":"","requiredPoints":[""],"forbiddenPoints":[""],"sourceIndex":1}]}.'));
   assert.equal(generation.inside, `SOURCE 1 (https://example.com/refunds):\n${hostileText}\n\nSOURCE 2:\nShipping takes 2 days.`);
   assert.equal(generation.after, '', 'nothing may follow the closing marker');
+  assert.doesNotMatch(generation.before, /Spread the cases/, 'no section list, no spreading instruction');
+  // Spreading: each passage is labelled with its section inside the fence, and the instruction outside names no section.
+  const spreadSections = ['1 Refunds', `2 Shipping ${attack}`];
+  const [, spreadUser] = datasetGenerationMessages({ count: 5, caseType: 'customer-facing policy evaluation cases', website: false, technical: false, sections: spreadSections }, sources);
+  const spreadParts = fenced(spreadUser.content);
+  assert.match(spreadParts.before, /Spread the cases across the sections named in the passage labels: give each section worth testing one case before any section gets a second\./);
+  assert.ok(!spreadParts.before.includes('Refunds') && !spreadParts.before.includes(attack), 'section titles come from the document, so they stay inside the fence');
+  assert.equal(spreadParts.inside, `SOURCE 1 (https://example.com/refunds) [section: 1 Refunds]:\n${hostileText}\n\nSOURCE 2 [section: 2 Shipping ${attack}]:\nShipping takes 2 days.`);
+  assert.equal(spreadParts.after, '');
+  {
+    const { passageSections } = require('./server.js');
+    const text = ['1 Refunds', `Refunds take 30 days. ${'x '.repeat(150)}`, '2 Shipping', `Shipping takes 2 days. ${'y '.repeat(150)}`].join('\n');
+    const passages = [{ text: `Refunds take 30 days. ${'x '.repeat(20)}` }, { text: 'Shipping takes 2 days.' }, { text: 'Not in the document.' }];
+    assert.deepEqual(passageSections({ kind: 'policy', text }, passages), ['1 Refunds', '2 Shipping', null]);
+    assert.equal(passageSections({ kind: 'website', pages: [] }, passages), null, 'website passages are already labelled by page');
+    assert.equal(passageSections({ kind: 'policy', text: 'No headings here.' }, passages), null);
+  }
   assert.notEqual(generation.boundary, '0000000000000000', 'forged markers in the source must not match the real boundary');
 
   // Technical analysis.
@@ -786,6 +815,42 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     assert.deepEqual(fallback.keywordOnlySources, ['Amenities.pdf', 'Rooftop.pdf']); assert.equal(fallback.kept.length, 1);
   } finally { globalThis.fetch = savedFetch; }
 }
+// Coverage: which sections of a source have questions.
+{
+  const { sourceTopics, datasetCoverage } = require('./server.js');
+  const filler = words => Array.from({ length: words }, (_, index) => `word${index}`).join(' ');
+  const manual = ['Harborlight Hotel Operations Manual', 'Document control', `Property Harborlight Hotel ${filler(10)}`,
+    '1 Role Purpose and Scope', `The agent answers guest questions. ${filler(40)}`,
+    '2 Property Profile', `Valet parking is $32 per night. ${filler(40)}`,
+    '7 Arrival Stay and Departure', 'Short intro.',
+    '7.3 Check out', `Standard check-out is 11:00 AM. A 1:00 PM check-out costs $40. ${filler(30)}`,
+    '8 Eligibility and Special Rules', `The minimum check-in age is 21. Children under 5 eat breakfast free; ages 5 to 12 pay $12. ${filler(30)}`,
+    '12 PM possible free; 1 PM $40; after that one night', 'Totals include tax.'].join('\n');
+  const topics = sourceTopics({ kind: 'policy', text: manual });
+  assert.deepEqual(topics.map(topic => topic.title), ['1 Role Purpose and Scope', '2 Property Profile', '7 Arrival Stay and Departure / 7.3 Check out', '8 Eligibility and Special Rules'], 'numbered headings; a near-empty heading joins the next; table lines are not headings');
+  assert.ok(topics[0].text.startsWith('Harborlight Hotel Operations Manual'), 'the title page belongs to the first section');
+  assert.equal(topics.map(topic => topic.text).join(''), manual, 'sections cover the whole text');
+  const plain = sourceTopics({ kind: 'policy', text: 'x'.repeat(3100) });
+  assert.equal(plain.length, 3); assert.match(plain[0].title, /^Part 1: /);
+  assert.deepEqual(sourceTopics({ kind: 'website', pages: [{ url: 'https://a.example/', title: 'Home', text: 'Hi' }, { url: 'https://a.example/faq', text: 'FAQ' }] }).map(topic => topic.title), ['Home', 'https://a.example/faq']);
+
+  const store = { documents: [{ id: 'doc_cov', kind: 'policy', name: 'Manual.docx', text: manual }], technicalDocuments: [], websiteSnapshots: [] };
+  // The breakfast passage starts in "Check out" and runs into "Eligibility"; the question's words decide which it tests.
+  const across = manual.slice(manual.indexOf('A 1:00 PM check-out'), manual.indexOf('ages 5 to 12') + 20);
+  const coverage = datasetCoverage(store, { documentId: 'doc_cov', cases: [
+    { question: 'How much is valet parking?', expectedAnswer: '$32 per night.', sourceEvidence: 'Valet parking is $32 per night.' },
+    { question: 'Is breakfast free for my 3-year-old?', expectedAnswer: 'Children under 5 eat breakfast free.', requiredPoints: ['Children under 5 eat free'], sourceEvidence: across },
+    { question: 'Can I check out at 1 PM?', expectedAnswer: 'Yes, for $40.', sourceEvidence: 'Standard check-out is 11:00 AM.   A 1:00 PM check-out costs $40.' },
+    { question: 'Rooftop pool?', expectedAnswer: 'Says it does not know.', caseType: 'decline', sourceEvidence: 'Valet parking is $32 per night.' },
+    { question: 'Edited', expectedAnswer: 'x', sourceEvidence: 'Text the reviewer rewrote by hand.' },
+  ] });
+  assert.deepEqual(coverage.sections, [{ title: '1 Role Purpose and Scope', cases: [] }, { title: '2 Property Profile', cases: [1] }, { title: '7 Arrival Stay and Departure / 7.3 Check out', cases: [3] }, { title: '8 Eligibility and Special Rules', cases: [2] }]);
+  assert.equal(coverage.covered, 3); assert.equal(coverage.total, 4); assert.deepEqual(coverage.unmatched, [5], 'edited evidence is reported, and should-decline questions are not counted'); assert.equal(coverage.unit, 'sections');
+  assert.equal(datasetCoverage(store, { documentId: 'missing', cases: [] }), null);
+  const site = { documents: [], technicalDocuments: [], websiteSnapshots: [{ id: 'snap', websiteId: 'w', status: 'complete', rootUrl: 'https://a.example/', pages: [{ url: 'https://a.example/', text: 'Hi' }, { url: 'https://a.example/faq', text: 'FAQ' }] }] };
+  const siteCoverage = datasetCoverage(site, { documentId: 'snap', cases: [{ question: 'q', expectedAnswer: 'a', sourceEvidence: 'FAQ', sourceUrl: 'https://a.example/faq' }] });
+  assert.equal(siteCoverage.unit, 'pages'); assert.deepEqual(siteCoverage.sections.map(section => section.cases), [[], [1]]);
+}
 const listener = createServer(app);
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const originalFetch = globalThis.fetch;
@@ -877,13 +942,15 @@ try {
   assert.equal((await requestApp(listener, 'DELETE', `/api/connections/${reasoningControl.body.id}`)).status, 204);
   const mixed = await requestApp(listener, 'POST', '/api/datasets/generate', { documentId: scopedDocument.body.id, connectionId: control.body.id, count: 10, declineShare: 20 });
   assert.equal(mixed.status, 201);
+  assert.equal(typeof mixed.body.coverage.total, 'number', 'a generated draft comes back with its coverage');
+  assert.ok((await requestApp(listener, 'GET', '/api/state')).body.datasets.every(item => 'coverage' in item), 'every dataset in the state has coverage');
   const mixedDeclines = mixed.body.cases.filter(item => item.caseType === 'decline');
   assert.deepEqual(mixedDeclines.map(item => item.question), ['Do riders get a rooftop lounge?'], 'the question another source answers is dropped');
   assert.equal(mixed.body.declineCheck.requested, 2); assert.equal(mixed.body.declineCheck.kept, 1); assert.deepEqual(mixed.body.declineCheck.dropped, ['Can riders request a transit trip plan?']);
   const noDeclines = await requestApp(listener, 'POST', '/api/datasets/generate', { documentId: scopedDocument.body.id, connectionId: control.body.id, count: 10, declineShare: 0 });
   assert.equal(noDeclines.body.cases.some(item => item.caseType === 'decline'), false); assert.equal(noDeclines.body.declineCheck, undefined);
   const savedMixed = await requestApp(listener, 'PUT', `/api/datasets/${mixed.body.id}`, { cases: mixed.body.cases.map(item => item.caseType === 'decline' ? { ...item, sourceEvidence: '' } : item) });
-  assert.equal(savedMixed.status, 200); assert.equal(savedMixed.body.cases.find(item => item.caseType === 'decline').declineKind, 'close-but-missing', 'saving a review keeps the case type');
+  assert.equal(savedMixed.status, 200); assert.ok(savedMixed.body.coverage); assert.equal(savedMixed.body.cases.find(item => item.caseType === 'decline').declineKind, 'close-but-missing', 'saving a review keeps the case type');
   assert.equal((await requestApp(listener, 'POST', `/api/datasets/${mixed.body.id}/approve`)).status, 200);
   const mixedRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: mixed.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: savedMixed.body.cases.map(item => item.caseType === 'decline' ? 'I do not have that information.' : 'Riders can request a transit trip plan from the planner page or by phone.') });
   assert.equal(mixedRun.status, 201);
