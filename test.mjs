@@ -9,7 +9,7 @@ const testDataDir = mkdtempSync(path.join(tmpdir(), 'eval-tool-test-'));
 process.env.EVAL_TOOL_DATA_DIR = testDataDir;
 process.env.APP_ENCRYPTION_KEY = 'a'.repeat(64);
 const require = createRequire(import.meta.url);
-const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest } = require('./server.js');
+const { app, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete } = require('./server.js');
 const { normalizeWebsiteUrl, isPublicAddress, isInScope, robotsAllows, browserExecutablePath } = require('./website-crawler.js');
 
 const html = readFileSync('index.html', 'utf8');
@@ -79,8 +79,9 @@ assert.match(server, /app\.post\('\/api\/evaluations\/livekit'/);
 assert.match(html, /vendor\/livekit-client\.js/);
 assert.match(js, /function waitForLiveKitAgent\(room\)/);
 assert.match(js, /state\(participant\) !== 'initializing'/);
-assert.match(js, /if \(afterQuestion && text\) finish\(null, text\)/);
-assert.match(js, /FlexAgent did not return a final answer within 90 seconds/);
+assert.match(js, /await waitForLiveKitAgent\(room\); await waitForLiveKitGreeting\(room, events\);\s*return await collectLiveKitAnswer\(room, question, events\);/);
+assert.match(js, /const LIVEKIT_ANSWER_TIMEOUT_MS = 90000;/);
+assert.match(js, /FlexAgent did not return a final answer within \$\{timeoutMs \/ 1000\} seconds/);
 assert.match(server, /app\.post\('\/api\/openai-setup'/);
 assert.match(server, /app\.delete\('\/api\/connections\/:id'/);
 assert.match(server, /app\.put\('\/api\/connections\/:id\/prompt'/);
@@ -280,6 +281,116 @@ const combinedDiagnosis = multiTurnGapDiagnosis([{ ...gapVerdict, turn: rubric }
 assert.deepEqual(combinedDiagnosis.categories, ['Likely retrieval miss', 'Conversation memory gap']);
 assert.match(combinedDiagnosis.why, /3 of 3.*1 expected conversation detail/);
 assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }), undefined);
+
+// LiveKit answer capture (app.js): replay FlexAgent's agent-state and transcription sequence against a fake room.
+{
+  const start = js.indexOf('const LIVEKIT_QUIET_MS'); const end = js.indexOf('async function liveKitAnswer');
+  const { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete: browserLooksIncomplete, LIVEKIT_QUIET_MS } = new Function(`${js.slice(start, end)}; return { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete, LIVEKIT_QUIET_MS };`)();
+  assert.equal(LIVEKIT_QUIET_MS, 5000);
+  const events = { ParticipantAttributesChanged: 'attributes' };
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const fakeRoom = (state = 'listening') => {
+    const listeners = []; let onStream; const sent = [];
+    const agent = { identity: 'agent', attributes: { 'lk.agent.state': state } };
+    const room = { remoteParticipants: new Map([['agent', agent], ['visitor', { identity: 'visitor', attributes: {} }]]), on: (name, fn) => listeners.push(fn), off: (name, fn) => { const at = listeners.indexOf(fn); if (at >= 0) listeners.splice(at, 1); }, registerTextStreamHandler: (topic, fn) => { assert.equal(topic, 'lk.transcription'); onStream = fn; }, localParticipant: { sendText: async (text, options) => { sent.push({ text, topic: options.topic }); } } };
+    const setState = next => { agent.attributes = { 'lk.agent.state': next }; [...listeners].forEach(fn => fn({ 'lk.agent.state': next }, agent)); };
+    // Opens a transcription stream; it closes after readMs, or when the returned close() is called.
+    const stream = (text, { identity = 'agent', readMs = 0, manual = false } = {}) => { let close; const read = new Promise(resolve => { close = () => resolve(text); }); if (!manual) setTimeout(close, readMs); onStream({ readAll: () => read }, { identity }); return close; };
+    return { room, sent, setState, stream, listenerCount: () => listeners.length };
+  };
+  const timing = { quietMs: 60, shortReplyQuietMs: 300, timeoutMs: 2000 };
+  const longAnswer = 'The 22nd Ave Transit Center stop in BFT is stop 4512, served by routes 3 and 7.';
+  const track = promise => { const state = { done: false }; promise.then(value => Object.assign(state, { done: true, value }), error => Object.assign(state, { done: true, error })); return state; };
+
+  // No tool: the question is sent and the answer is kept once the agent has been quiet for the quiet period.
+  {
+    const fake = fakeRoom(); const began = Date.now(); const result = track(collectLiveKitAnswer(fake.room, 'Where is the stop?', events, timing));
+    await wait(5); assert.deepEqual(fake.sent, [{ text: 'Where is the stop?', topic: 'lk.chat' }]);
+    fake.setState('thinking'); fake.stream(longAnswer); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(30); assert.equal(result.done, false, 'waits for the quiet period');
+    await wait(80); assert.equal(result.value, longAnswer);
+    assert.ok(Date.now() - began < timing.shortReplyQuietMs, 'a full answer does not use the longer wait');
+    assert.equal(fake.listenerCount(), 0);
+  }
+  // Slow tool: filler, back to listening while the tool runs, then the real answer. Both parts are kept in order.
+  // The gap (150 ms) is longer than the quiet period, so this also checks the longer wait for filler-like text.
+  {
+    const fake = fakeRoom(); const result = track(collectLiveKitAnswer(fake.room, 'Find the stop', events, timing));
+    fake.setState('thinking'); await wait(10); fake.stream('One moment please...'); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(150); assert.equal(result.done, false, 'filler alone does not end the turn');
+    fake.setState('thinking'); await wait(10); fake.stream(longAnswer); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(120); assert.equal(result.value, `One moment please...\n${longAnswer}`);
+  }
+  // A short real answer is kept, but only after the longer wait.
+  {
+    const fake = fakeRoom(); const began = Date.now(); const result = track(collectLiveKitAnswer(fake.room, 'Open today?', events, timing));
+    fake.setState('thinking'); fake.stream('Yes, until 9 pm.'); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(150); assert.equal(result.done, false);
+    await wait(250); assert.equal(result.value, 'Yes, until 9 pm.'); assert.ok(Date.now() - began >= timing.shortReplyQuietMs);
+  }
+  // A message still being read when the agent returns to listening is waited for; streams join in opening order.
+  {
+    const fake = fakeRoom(); const result = track(collectLiveKitAnswer(fake.room, 'Find the stop', events, timing));
+    fake.setState('thinking'); const closeFirst = fake.stream('The stop is in BFT.', { manual: true }); fake.stream('It is served by routes 3 and 7 every fifteen minutes.', { readMs: 5 }); fake.setState('speaking'); fake.setState('listening');
+    await wait(150); assert.equal(result.done, false, 'does not finish while a message is still arriving');
+    closeFirst(); await wait(120); assert.equal(result.value, 'The stop is in BFT.\nIt is served by routes 3 and 7 every fifteen minutes.');
+  }
+  // Messages from anyone other than the agent are ignored.
+  {
+    const fake = fakeRoom(); const result = track(collectLiveKitAnswer(fake.room, 'Find the stop', events, timing));
+    fake.stream('Find the stop', { identity: 'visitor' }); fake.setState('thinking'); fake.stream(longAnswer); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(120); assert.equal(result.value, longAnswer);
+  }
+  // Timeout with only the filler: fails instead of sending the filler to the judge.
+  {
+    const fake = fakeRoom(); const result = track(collectLiveKitAnswer(fake.room, 'Find the stop', events, { quietMs: 60, shortReplyQuietMs: 1000, timeoutMs: 250 }));
+    fake.setState('thinking'); fake.stream('One moment please...'); fake.setState('speaking'); await wait(5); fake.setState('listening');
+    await wait(320); assert.equal(result.done, true); assert.match(result.error.message, /did not finish its answer within 0\.25 seconds\. It only sent: "One moment please\.\.\."/);
+  }
+  // Greeting: the question waits until the greeting has finished.
+  {
+    const fake = fakeRoom('listening'); const greeted = track(waitForLiveKitGreeting(fake.room, events, { startMs: 100, maxMs: 1000 }));
+    await wait(20); fake.setState('thinking'); await wait(150); fake.setState('speaking'); await wait(20);
+    assert.equal(greeted.done, false, 'still greeting after the start timeout');
+    fake.setState('listening'); await wait(5); assert.equal(greeted.done, true); assert.equal(fake.listenerCount(), 0);
+  }
+  // Greeting already speaking when the agent becomes ready.
+  {
+    const fake = fakeRoom('speaking'); const greeted = track(waitForLiveKitGreeting(fake.room, events, { startMs: 50, maxMs: 1000 }));
+    await wait(100); assert.equal(greeted.done, false); fake.setState('listening'); await wait(5); assert.equal(greeted.done, true);
+  }
+  // No greeting: the question goes after the short start timeout.
+  {
+    const fake = fakeRoom('listening'); const began = Date.now(); await waitForLiveKitGreeting(fake.room, events, { startMs: 60, maxMs: 1000 });
+    assert.ok(Date.now() - began >= 55); assert.equal(fake.listenerCount(), 0);
+  }
+  // A greeting that never ends does not block the run past the maximum wait.
+  {
+    const fake = fakeRoom('speaking'); const began = Date.now(); await waitForLiveKitGreeting(fake.room, events, { startMs: 20, maxMs: 120 });
+    assert.ok(Date.now() - began >= 115);
+  }
+  // Short or filler-like answers are flagged the same way in the browser and on the server.
+  for (const [answer, incomplete] of [['One moment please...', true], ['Just a moment…', true], ['Let me check that for you.', true], ['Yes, until 9 pm.', true], ['', true], [longAnswer, false], [`One moment please... ${longAnswer}`, false], ['Let me check: the stop is 4512, served by routes 3 and 7 every fifteen minutes.', false]]) {
+    assert.equal(browserLooksIncomplete(answer), incomplete, answer);
+    assert.equal(answerLooksIncomplete(answer), incomplete, answer);
+  }
+  // Flagged answers get their own count and are left out of "Where to investigate first".
+  {
+    const helpers = js.slice(js.indexOf('const HTML_ESCAPES'), js.indexOf('\n', js.indexOf('function escapeHtml')));
+    const summaryCode = js.slice(js.indexOf('function incompleteAnswersMarkup'), js.indexOf('\n}\n', js.indexOf('function evaluationSummaryMarkup')) + 2);
+    const { evaluationSummaryMarkup } = new Function(`${helpers}\n${summaryCode}; return { evaluationSummaryMarkup };`)();
+    const miss = { pass: false, gapDiagnosis: { categories: ['Likely retrieval miss'] }, answer: 'No.' };
+    const mixed = evaluationSummaryMarkup({ results: [{ ...miss, answerMayBeIncomplete: true }, miss, { ...miss, answerMayBeIncomplete: true }, miss, { pass: true }] });
+    assert.match(mixed, /2 answers may be incomplete — re-run the evaluation\./);
+    assert.match(mixed, /Scenarios #1, #3 got only a short or filler-like reply/);
+    assert.match(mixed, /2 of 2 GAPs miss at least three quarters/, 'the diagnosis counts only unflagged GAPs');
+    assert.match(mixed, /Replay representative scenarios #2, #4;/);
+    const onlyFlagged = evaluationSummaryMarkup({ results: [{ ...miss, answerMayBeIncomplete: true }, { pass: true }] });
+    assert.match(onlyFlagged, /1 answer may be incomplete/); assert.doesNotMatch(onlyFlagged, /<h2>Where to investigate first<\/h2>/);
+    assert.equal(evaluationSummaryMarkup({ results: [{ pass: true }] }), '');
+  }
+  assert.match(js, /incompleteAnswerNote\(result\)/); assert.match(js, /incompleteAnswerNote\(item\)/); assert.match(js, /Answer may be incomplete/); assert.match(css, /\.result-incomplete/);
+}
 
 // Browser-side HTML escaping (app.js runs in the browser, so evaluate just its helpers).
 {
@@ -527,6 +638,11 @@ try {
   const run = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['A transit trip plan.'] });
   assert.equal(run.status, 201);
   assert.equal(run.body.agentName, 'Transit Planner');
+  assert.equal(run.body.results[0].answerMayBeIncomplete, true, 'a very short LiveKit answer is flagged, not silently scored');
+  assert.equal(typeof run.body.results[0].score, 'number');
+  const fullRun = await requestApp(listener, 'POST', '/api/evaluations/livekit', { datasetId: dataset.body.id, targetConnectionId: selected.body.target.id, controlConnectionId: control.body.id, answers: ['One moment please... Riders can request a transit trip plan from the planner page or by phone.'] });
+  assert.equal(fullRun.status, 201);
+  assert.equal(fullRun.body.results[0].answerMayBeIncomplete, undefined);
   const testStorePath = path.join(testDataDir, 'store.json');
   const websiteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
   websiteStore.websiteSnapshots.push({ id: 'site_snapshot_test', websiteId: 'site_test', kind: 'website', name: 'transit.example', status: 'complete', orgId: '65f000000000000000000001', agentId: '65f000000000000000000002', orgName: 'AI Dev Lab', agentName: 'Transit Planner', pages: [{ id: 'page_test', url: 'https://transit.example/help', text: 'Riders can request a transit trip plan.' }] });

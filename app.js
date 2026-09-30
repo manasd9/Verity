@@ -227,9 +227,16 @@ function gapDiagnosisMarkup(result) {
   return `<section class="gap-diagnosis"><h3>RAG investigation</h3><p><b>Likely issue:</b> ${diagnosis.categories.map(escapeHtml).join(' · ')}</p><p><b>Observed gap:</b> ${escapeHtml(diagnosis.why)}</p><p><b>What to inspect:</b> ${escapeHtml(diagnosis.teamFocus)}</p>${result.retrievalUnavailable ? '<small>Inferred from the answer and scoring rubric; no target retrieval trace was captured.</small>' : ''}</section>`;
 }
 
+// Flagged answers still count in the overall score, but are left out of the diagnosis: their GAP may be a lost answer, not the agent.
+function incompleteAnswersMarkup(evaluation) {
+  const flagged = evaluation.results.map((result, index) => ({ result, number: index + 1 })).filter(item => item.result.answerMayBeIncomplete);
+  if (!flagged.length) return '';
+  return `<section class="panel card-pad evaluation-incomplete" role="note"><p><b>${flagged.length} ${flagged.length === 1 ? 'answer' : 'answers'} may be incomplete — re-run the evaluation.</b></p><p>Scenarios ${escapeHtml(flagged.map(item => `#${item.number}`).join(', '))} got only a short or filler-like reply from FlexAgent. They still count in the overall score but are left out of “Where to investigate first”.</p></section>`;
+}
 function evaluationSummaryMarkup(evaluation) {
-  const gaps = evaluation.results.map((result, index) => ({ result, number: index + 1 })).filter(item => !item.result.pass);
-  if (!gaps.length) return '';
+  const incomplete = incompleteAnswersMarkup(evaluation);
+  const gaps = evaluation.results.map((result, index) => ({ result, number: index + 1 })).filter(item => !item.result.pass && !item.result.answerMayBeIncomplete);
+  if (!gaps.length) return incomplete;
   const withCategory = category => gaps.filter(item => item.result.gapDiagnosis?.categories?.includes(category));
   const major = withCategory('Likely retrieval miss');
   const partial = withCategory('Partial retrieval coverage');
@@ -242,7 +249,7 @@ function evaluationSummaryMarkup(evaluation) {
     : `${gaps.length} scenarios have GAPs with a mix of missing information and unsupported content. The answer patterns do not point to one dominant failure mode.`;
   const firstCases = (major.length ? major : gaps).slice(0, 3);
   const traceNote = gaps.some(item => item.result.retrievalUnavailable) ? 'FlexAgent retrieval traces were not captured, so this is a hypothesis from the answers and rubrics.' : 'Confirm the hypothesis against the retrieved sections recorded for each scenario.';
-  return `<section class="panel card-pad evaluation-diagnosis"><p class="eyebrow">ACROSS THIS EVALUATION</p><h2>Where to investigate first</h2><p class="evaluation-diagnosis-finding">${escapeHtml(finding)}</p><div class="evaluation-diagnosis-counts"><span><b>${major.length}</b> near-total misses</span><span><b>${partial.length}</b> partial coverage gaps</span><span><b>${fallbacks.length}</b> insufficient-info replies</span><span><b>${unsupported.length}</b> unsupported claims</span></div><ol><li><strong>Capture the evidence path.</strong> Replay representative scenarios ${escapeHtml(refs(firstCases))}; record the top retrieved chunks and the final context sent to the model.</li><li><strong>If the expected evidence is absent from retrieval,</strong> inspect document indexing, metadata filters, query matching, top-k, and ranking.</li><li><strong>If retrieval contains it,</strong> check context assembly and truncation. If it reaches the model but the agent still declines to answer, inspect grounding instructions and the fallback threshold.</li>${unsupported.length ? `<li><strong>Check unsupported content.</strong> For ${escapeHtml(refs(unsupported))}, compare the extra claim with the retrieved chunks and final context.</li>` : ''}</ol><p class="evaluation-diagnosis-limit">${escapeHtml(traceNote)} The exact internal cause needs the retrieved chunks and final prompt context.</p></section>`;
+  return `${incomplete}<section class="panel card-pad evaluation-diagnosis"><p class="eyebrow">ACROSS THIS EVALUATION</p><h2>Where to investigate first</h2><p class="evaluation-diagnosis-finding">${escapeHtml(finding)}</p><div class="evaluation-diagnosis-counts"><span><b>${major.length}</b> near-total misses</span><span><b>${partial.length}</b> partial coverage gaps</span><span><b>${fallbacks.length}</b> insufficient-info replies</span><span><b>${unsupported.length}</b> unsupported claims</span></div><ol><li><strong>Capture the evidence path.</strong> Replay representative scenarios ${escapeHtml(refs(firstCases))}; record the top retrieved chunks and the final context sent to the model.</li><li><strong>If the expected evidence is absent from retrieval,</strong> inspect document indexing, metadata filters, query matching, top-k, and ranking.</li><li><strong>If retrieval contains it,</strong> check context assembly and truncation. If it reaches the model but the agent still declines to answer, inspect grounding instructions and the fallback threshold.</li>${unsupported.length ? `<li><strong>Check unsupported content.</strong> For ${escapeHtml(refs(unsupported))}, compare the extra claim with the retrieved chunks and final context.</li>` : ''}</ol><p class="evaluation-diagnosis-limit">${escapeHtml(traceNote)} The exact internal cause needs the retrieved chunks and final prompt context.</p></section>`;
 }
 
 function evaluationSourceName(evaluation) { const dataset = workspace.datasets.find(item => item.id === evaluation.datasetId); return allDocuments().find(item => item.id === dataset?.documentId)?.name || 'Source'; }
@@ -272,6 +279,7 @@ function filterResultScenarios(filter) {
   const first = document.querySelector('.js-result-pick:not([hidden])');
   showResultScenario(current && !current.hidden ? resultScenarioIndex : first ? Number(first.dataset.index) : resultScenarioIndex);
 }
+function incompleteAnswerNote(result) { return result.answerMayBeIncomplete ? '<p class="result-incomplete" role="note"><b>Answer may be incomplete.</b> FlexAgent sent only a short or filler-like reply, so this score may reflect a lost answer rather than the agent. Re-run the evaluation before acting on it.</p>' : ''; }
 function results() {
   const visibleRuns = workspace.evaluations.filter(inSelectedWorkspace);
   const latest = visibleRuns.find(item => item.id === viewingEvaluationId);
@@ -279,7 +287,7 @@ function results() {
   const label = evaluation => `${evaluationSourceName(evaluation)} · ${evaluationRunType(evaluation)} · ${evaluation.results.length} scenarios`;
   const picker = visibleRuns.length ? `<section class="panel evaluation-switcher"><label for="evaluation-history-select">${latest ? 'Viewing evaluation' : 'Open a saved evaluation'}</label><select id="evaluation-history-select"><option value="">Choose an evaluation</option>${visibleRuns.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === latest?.id ? 'selected' : ''}>${escapeHtml(label(item))} · ${escapeHtml(item.score)}% · ${new Date(item.createdAt).toLocaleString()}</option>`).join('')}</select></section>` : '';
   const points = (items, empty) => (items || []).length ? `<ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : `<p class="help">${empty}</p>`;
-  const detail = (result, index) => `<article id="result-case-${index}" class="result-detail ${result.pass ? 'is-pass' : 'is-gap'}" ${index === resultScenarioIndex ? '' : 'hidden'}><header class="result-detail-head"><div><h3>${escapeHtml(result.case.question)}</h3></div><div class="result-detail-score"><span class="document-icon ${result.pass ? 'result-pass' : 'result-gap'}">${result.pass ? 'PASS' : 'GAP'}</span><strong class="score ${result.pass ? 'score-pass' : 'score-gap'}">${escapeHtml(result.score)}%</strong></div></header><section class="result-why"><b>Why this score</b><p>${escapeHtml(result.rationale || 'No rationale returned.')}</p></section>${gapDiagnosisMarkup(result)}<div class="result-compare"><section><b>Tested agent’s answer</b><p>${escapeHtml(result.answer)}</p></section><section><b>Expected answer <span>from the golden dataset</span></b><p>${escapeHtml(result.case.expectedAnswer)}</p></section></div><div class="result-compare"><section><b>Rubric · must include</b>${points(result.case.requiredPoints, 'No required points.')}</section><section><b>Rubric · must not say</b>${points(result.case.forbiddenPoints, 'No forbidden points.')}</section></div>${result.turns ? `<section class="result-block"><b>Conversation turns</b><p>${result.turns.map((turn, turnIndex) => `Turn ${turnIndex + 1}: ${turn.pass ? 'PASS' : 'GAP'} — ${escapeHtml(turn.answer)}`).join('\n')}</p><p>Final memory: ${result.memoryVerdict?.pass ? 'PASS' : `Missing ${escapeHtml(result.memoryVerdict?.missing?.join(', ') || 'values')}`}</p></section>` : ''}<details class="result-evidence"><summary>Source evidence</summary><p>${escapeHtml(result.case.sourceEvidence)}</p>${result.case.sourceUrl ? `<p>${sourceLink(result.case.sourceUrl, ' target="_blank" rel="noreferrer"')}</p>` : ''}</details><div class="retrieval-trigger"><button class="button button-secondary button-small js-view-retrieval" data-evaluation-id="${escapeHtml(latest.id)}" data-result-index="${index}" type="button">View retrieved policy sections (${(result.retrievedChunks || []).length})</button></div></article>`;
+  const detail = (result, index) => `<article id="result-case-${index}" class="result-detail ${result.pass ? 'is-pass' : 'is-gap'}" ${index === resultScenarioIndex ? '' : 'hidden'}><header class="result-detail-head"><div><h3>${escapeHtml(result.case.question)}</h3></div><div class="result-detail-score"><span class="document-icon ${result.pass ? 'result-pass' : 'result-gap'}">${result.pass ? 'PASS' : 'GAP'}</span><strong class="score ${result.pass ? 'score-pass' : 'score-gap'}">${escapeHtml(result.score)}%</strong></div></header><section class="result-why"><b>Why this score</b><p>${escapeHtml(result.rationale || 'No rationale returned.')}</p></section>${incompleteAnswerNote(result)}${gapDiagnosisMarkup(result)}<div class="result-compare"><section><b>Tested agent’s answer</b><p>${escapeHtml(result.answer)}</p></section><section><b>Expected answer <span>from the golden dataset</span></b><p>${escapeHtml(result.case.expectedAnswer)}</p></section></div><div class="result-compare"><section><b>Rubric · must include</b>${points(result.case.requiredPoints, 'No required points.')}</section><section><b>Rubric · must not say</b>${points(result.case.forbiddenPoints, 'No forbidden points.')}</section></div>${result.turns ? `<section class="result-block"><b>Conversation turns</b><p>${result.turns.map((turn, turnIndex) => `Turn ${turnIndex + 1}: ${turn.pass ? 'PASS' : 'GAP'} — ${escapeHtml(turn.answer)}`).join('\n')}</p><p>Final memory: ${result.memoryVerdict?.pass ? 'PASS' : `Missing ${escapeHtml(result.memoryVerdict?.missing?.join(', ') || 'values')}`}</p></section>` : ''}<details class="result-evidence"><summary>Source evidence</summary><p>${escapeHtml(result.case.sourceEvidence)}</p>${result.case.sourceUrl ? `<p>${sourceLink(result.case.sourceUrl, ' target="_blank" rel="noreferrer"')}</p>` : ''}</details><div class="retrieval-trigger"><button class="button button-secondary button-small js-view-retrieval" data-evaluation-id="${escapeHtml(latest.id)}" data-result-index="${index}" type="button">View retrieved policy sections (${(result.retrievedChunks || []).length})</button></div></article>`;
   const selected = viewingRetrievedChunks && visibleRuns.find(item => item.id === viewingRetrievedChunks.evaluationId)?.results[viewingRetrievedChunks.resultIndex];
   const retrievalPanel = selected ? `<div class="retrieval-overlay"><section class="retrieval-panel" role="dialog" aria-modal="true" aria-labelledby="retrieval-title"><div class="retrieval-panel-head"><div><p class="eyebrow">RETRIEVAL EVIDENCE</p><h2 id="retrieval-title">Source sections sent to the tested agent</h2><p>${escapeHtml(selected.case.question)}</p></div><button class="button button-secondary button-small js-close-retrieval" type="button">Close</button></div><div class="retrieval-list">${(selected.retrievedChunks || []).map((chunk, index) => `<details ${index === 0 ? 'open' : ''}><summary>Section ${index + 1}<span>${Number(chunk.score || 0).toFixed(2)} match</span></summary>${chunk.sourceUrl ? sourceLink(chunk.sourceUrl, ' target="_blank" rel="noreferrer"') : ''}<p>${escapeHtml(chunk.text)}</p></details>`).join('') || '<p>No retrieval evidence was recorded for this evaluation.</p>'}</div></section></div>` : '';
   const gapCount = latest ? latest.results.filter(result => !result.pass).length : 0;
@@ -288,7 +296,7 @@ function results() {
     if (resultScenarioEvaluationId !== evaluation.id) { resultScenarioEvaluationId = evaluation.id; resultFilter = 'all'; const firstGap = evaluation.results.findIndex(result => !result.pass); resultScenarioIndex = firstGap >= 0 ? firstGap : 0; }
     resultScenarioIndex = Math.min(Math.max(resultScenarioIndex, 0), evaluation.results.length - 1);
     const shown = result => resultFilter === 'all' || (resultFilter === 'gap' ? !result.pass : result.pass);
-    const list = evaluation.results.map((result, index) => `<button class="result-list-item js-result-pick ${result.pass ? 'is-pass' : 'is-gap'}" data-index="${index}" data-outcome="${result.pass ? 'pass' : 'gap'}" type="button" ${index === resultScenarioIndex ? 'aria-current="true"' : ''} ${shown(result) ? '' : 'hidden'}><span class="result-list-badge">${result.pass ? 'PASS' : 'GAP'}</span><span class="result-list-text"><span>${index + 1}. ${escapeHtml(result.case.question)}</span></span><span class="result-list-score">${escapeHtml(result.score)}%</span></button>`).join('');
+    const list = evaluation.results.map((result, index) => `<button class="result-list-item js-result-pick ${result.pass ? 'is-pass' : 'is-gap'}" data-index="${index}" data-outcome="${result.pass ? 'pass' : 'gap'}" type="button" ${index === resultScenarioIndex ? 'aria-current="true"' : ''} ${shown(result) ? '' : 'hidden'}><span class="result-list-badge">${result.pass ? 'PASS' : 'GAP'}</span><span class="result-list-text"><span>${index + 1}. ${escapeHtml(result.case.question)}</span>${result.answerMayBeIncomplete ? '<span class="review-list-flag">Answer may be incomplete</span>' : ''}</span><span class="result-list-score">${escapeHtml(result.score)}%</span></button>`).join('');
     return `<div class="result-layout"><nav class="panel result-list" aria-label="Scenario results"><div class="result-list-head"><strong>Scenario results</strong><div class="result-filters" role="group" aria-label="Filter scenarios">${filters.map(([key, name, count]) => `<button class="result-filter js-result-filter" data-filter="${key}" type="button" aria-pressed="${key === resultFilter}">${escapeHtml(name)} <span>${count}</span></button>`).join('')}</div></div><div class="result-list-scroll">${list}</div></nav><section class="panel card-pad result-panel"><div class="review-pager"><span id="result-position">Scenario ${resultScenarioIndex + 1} of ${evaluation.results.length}</span><div class="button-row"><button class="button button-secondary button-small js-result-step" data-step="-1" type="button">‹ Previous</button><button class="button button-secondary button-small js-result-step" data-step="1" type="button">Next ›</button></div></div>${evaluation.results.map((result, index) => detail(result, index)).join('')}</section></div>`;
   };
   return `${header('Results', 'Completed evaluations will appear here, with the tested agent’s answer, the expected answer, the score, and the supporting source evidence.', download)}
@@ -663,25 +671,66 @@ function waitForLiveKitAgent(room) {
   });
 }
 
+const LIVEKIT_QUIET_MS = 5000; // Quiet time after the agent returns to listening; a slow tool's real answer can follow its filler line.
+const LIVEKIT_SHORT_REPLY_QUIET_MS = 20000; // Longer quiet time while everything collected is short or filler-like.
+const LIVEKIT_ANSWER_TIMEOUT_MS = 90000;
+const LIVEKIT_GREETING_START_MS = 3000; // Send the question anyway if no greeting starts within this time.
+const LIVEKIT_GREETING_MAX_MS = 30000;
+// FlexAgent speaks a filler line ("One moment please…") when a tool is slow. Keep in step with server.js.
+const FILLER_PHRASE = /\b(?:(?:one|just a|a) (?:moment|second|sec)|hold on|hang on|bear with me|let me (?:check|look|see|find)|(?:i'm |i am )?(?:checking|looking)(?: (?:that|this|into it|now))?)\b[^.!?…\n]{0,30}(?:[.!?…]+|$)/gi;
+function answerLooksIncomplete(answer) { return String(answer || '').replace(FILLER_PHRASE, '').trim().length < 40; }
+
+// FlexAgent greets each new visitor. Waits until that greeting ends (listening after thinking or speaking)
+// so it is not taken as the answer; sends anyway if no greeting starts soon.
+function waitForLiveKitGreeting(room, events, { startMs = LIVEKIT_GREETING_START_MS, maxMs = LIVEKIT_GREETING_MAX_MS } = {}) {
+  const agentState = () => [...room.remoteParticipants.values()].map(participant => participant.attributes?.['lk.agent.state']).find(Boolean);
+  return new Promise(resolve => {
+    let greeting = false;
+    const done = () => { clearTimeout(startTimer); clearTimeout(maxTimer); room.off(events.ParticipantAttributesChanged, check); resolve(); };
+    const check = () => { const state = agentState(); if (state === 'thinking' || state === 'speaking') { greeting = true; clearTimeout(startTimer); } else if (state === 'listening' && greeting) done(); };
+    const startTimer = setTimeout(() => { if (!greeting) done(); }, startMs);
+    const maxTimer = setTimeout(done, maxMs);
+    room.on(events.ParticipantAttributesChanged, check); check();
+  });
+}
+
+// Sends the question and joins every agent transcription until the turn is over. A slow tool makes FlexAgent
+// speak a filler line and return to listening before the real answer, so the turn ends only when the agent is
+// listening, no message is still arriving, and it has stayed quiet for the quiet period.
+function collectLiveKitAnswer(room, question, events, { quietMs = LIVEKIT_QUIET_MS, shortReplyQuietMs = LIVEKIT_SHORT_REPLY_QUIET_MS, timeoutMs = LIVEKIT_ANSWER_TIMEOUT_MS } = {}) {
+  const isAgent = identity => Boolean(room.remoteParticipants.get(identity)?.attributes?.['lk.agent.state']);
+  return new Promise((resolve, reject) => {
+    const texts = []; let pending = 0; let busy = false; let listening = false; let settled = false; let quietTimer;
+    const collected = () => texts.filter(Boolean).join('\n').trim();
+    const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timeout); clearTimeout(quietTimer); room.off(events.ParticipantAttributesChanged, onAttributes); error ? reject(error) : resolve(value); };
+    const timeout = setTimeout(() => { const partial = collected(); finish(new Error(partial ? `FlexAgent did not finish its answer within ${timeoutMs / 1000} seconds. It only sent: "${partial.slice(0, 120)}"` : `FlexAgent did not return a final answer within ${timeoutMs / 1000} seconds.`)); }, timeoutMs);
+    const armQuiet = () => {
+      clearTimeout(quietTimer); if (settled || !busy || !listening || pending) return;
+      quietTimer = setTimeout(() => { const answer = collected(); if (answer) finish(null, answer); }, answerLooksIncomplete(collected()) ? shortReplyQuietMs : quietMs);
+    };
+    const onAttributes = (changed, participant) => {
+      if (!isAgent(participant?.identity)) return;
+      const state = participant.attributes['lk.agent.state']; if (state === 'thinking' || state === 'speaking') busy = true; listening = state === 'listening'; armQuiet();
+    };
+    room.on(events.ParticipantAttributesChanged, onAttributes);
+    room.registerTextStreamHandler('lk.transcription', (reader, participantInfo) => {
+      if (settled || !isAgent(participantInfo?.identity)) { reader.readAll().catch(() => {}); return; }
+      const index = texts.push('') - 1; pending += 1; busy = true; clearTimeout(quietTimer);
+      reader.readAll().then(text => { texts[index] = String(text || '').trim(); }, () => {}).finally(() => { pending -= 1; armQuiet(); });
+    });
+    Promise.resolve().then(() => room.localParticipant.sendText(question, { topic: 'lk.chat' })).catch(error => finish(error));
+  });
+}
+
 async function liveKitAnswer(targetConnectionId, question) {
   if (!window.LivekitClient) return Promise.reject(new Error('LiveKit client did not load. Restart Eval Tool and try again.'));
   const tokenResponse = await fetch('/api/flexagent-livekit-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetConnectionId }) });
   const credentials = await tokenResponse.json();
   if (!tokenResponse.ok) throw new Error(credentials.error || 'FlexAgent did not issue a LiveKit token.');
-  const room = new window.LivekitClient.Room();
+  const room = new window.LivekitClient.Room(); const events = window.LivekitClient.RoomEvent;
   try {
-    const answer = await new Promise(async (resolve, reject) => {
-      let active = false; let settled = false;
-      const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timeout); error ? reject(error) : resolve(value); };
-      const timeout = setTimeout(() => finish(new Error('FlexAgent did not return a final answer within 90 seconds.')), 90000);
-      room.registerTextStreamHandler('lk.transcription', async reader => {
-        const afterQuestion = active;
-        const text = (await reader.readAll()).trim();
-        if (afterQuestion && text) finish(null, text);
-      });
-      try { await room.connect(credentials.wsUrl, credentials.token); await waitForLiveKitAgent(room); if (!settled) { active = true; await room.localParticipant.sendText(question, { topic: 'lk.chat' }); } } catch (error) { finish(error); }
-    });
-    return answer;
+    await room.connect(credentials.wsUrl, credentials.token); await waitForLiveKitAgent(room); await waitForLiveKitGreeting(room, events);
+    return await collectLiveKitAnswer(room, question, events);
   } finally { await room.disconnect().catch(() => {}); }
 }
 
@@ -830,8 +879,8 @@ function downloadEvaluationReport() {
   const evaluation = workspace.evaluations.find(item => item.id === viewingEvaluationId && inSelectedWorkspace(item)) || workspace.evaluations.find(inSelectedWorkspace);
   const dataset = workspace.datasets.find(item => item.id === evaluation?.datasetId); const source = allDocuments().find(item => item.id === dataset?.documentId);
   if (!evaluation || !dataset) return;
-  const result = item => `<article><h2>${escapeHtml(item.case.question)}</h2><p class="verdict ${item.pass ? 'pass' : 'gap'}">${item.pass ? 'PASS' : 'GAP'} · ${escapeHtml(item.score)}%</p>${gapDiagnosisMarkup(item)}<h3>Tested agent’s answer</h3><p>${escapeHtml(item.answer)}</p><h3>Expected answer</h3><p>${escapeHtml(item.case.expectedAnswer)}</p><h3>Source evidence</h3><p>${escapeHtml(item.case.sourceEvidence)}</p>${item.case.sourceUrl ? `<p>${sourceLink(item.case.sourceUrl, ' rel="noreferrer"')}</p>` : ''}<h3>Required points</h3><ul>${(item.case.requiredPoints || []).map(point => `<li>${escapeHtml(point)}</li>`).join('') || '<li>None</li>'}</ul><h3>Forbidden points</h3><ul>${(item.case.forbiddenPoints || []).map(point => `<li>${escapeHtml(point)}</li>`).join('') || '<li>None</li>'}</ul><h3>Rationale</h3><p>${escapeHtml(item.rationale || 'No rationale returned.')}</p></article>`;
-  const report = `<!doctype html><html><head><meta charset="utf-8"><title>Evaluation report</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;color:#182338;line-height:1.5}header,article{border-bottom:1px solid #d8dee8;padding:0 0 24px;margin-bottom:28px}h1{margin-bottom:4px}h2{font-size:18px}h3{font-size:14px;margin-bottom:4px}p{white-space:pre-wrap}.score{font-size:32px;font-weight:700}.verdict{font-weight:700}.pass{color:#087443}.gap{color:#b42318}.gap-diagnosis{background:#fff5f2;border-left:3px solid #b42318;padding:12px 16px;margin:16px 0}.gap-diagnosis h3{margin:0 0 8px}.gap-diagnosis p{margin:6px 0}.gap-diagnosis small{color:#684b45}.evaluation-diagnosis{background:#f4f8f6;border:1px solid #d8e7df;padding:20px;margin:0 0 28px;break-inside:avoid}.evaluation-diagnosis h2{margin:5px 0 8px}.evaluation-diagnosis ol{padding-left:22px}.evaluation-diagnosis li{margin:8px 0}.evaluation-diagnosis-counts{display:flex;gap:18px;flex-wrap:wrap;font-size:13px}.evaluation-diagnosis-counts b{font-size:18px}.evaluation-diagnosis-limit{color:#586b66;font-size:12px}@media print{body{margin:20px;max-width:none}article{break-inside:avoid}}</style></head><body><header><h1>Evaluation report</h1><p>${escapeHtml(source?.name || 'Source document')} · ${escapeHtml(new Date(evaluation.createdAt).toLocaleString())}</p><p class="score">${escapeHtml(evaluation.score)}%</p><p>${evaluation.manual ? 'The tested agent’s answers were pasted from a manual test.' : 'The tested agent’s answers were generated through the configured model connection.'}</p></header>${evaluationSummaryMarkup(evaluation)}${evaluation.results.map(result).join('')}</body></html>`;
+  const result = item => `<article><h2>${escapeHtml(item.case.question)}</h2><p class="verdict ${item.pass ? 'pass' : 'gap'}">${item.pass ? 'PASS' : 'GAP'} · ${escapeHtml(item.score)}%</p>${incompleteAnswerNote(item)}${gapDiagnosisMarkup(item)}<h3>Tested agent’s answer</h3><p>${escapeHtml(item.answer)}</p><h3>Expected answer</h3><p>${escapeHtml(item.case.expectedAnswer)}</p><h3>Source evidence</h3><p>${escapeHtml(item.case.sourceEvidence)}</p>${item.case.sourceUrl ? `<p>${sourceLink(item.case.sourceUrl, ' rel="noreferrer"')}</p>` : ''}<h3>Required points</h3><ul>${(item.case.requiredPoints || []).map(point => `<li>${escapeHtml(point)}</li>`).join('') || '<li>None</li>'}</ul><h3>Forbidden points</h3><ul>${(item.case.forbiddenPoints || []).map(point => `<li>${escapeHtml(point)}</li>`).join('') || '<li>None</li>'}</ul><h3>Rationale</h3><p>${escapeHtml(item.rationale || 'No rationale returned.')}</p></article>`;
+  const report = `<!doctype html><html><head><meta charset="utf-8"><title>Evaluation report</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;color:#182338;line-height:1.5}header,article{border-bottom:1px solid #d8dee8;padding:0 0 24px;margin-bottom:28px}h1{margin-bottom:4px}h2{font-size:18px}h3{font-size:14px;margin-bottom:4px}p{white-space:pre-wrap}.score{font-size:32px;font-weight:700}.verdict{font-weight:700}.pass{color:#087443}.gap{color:#b42318}.evaluation-incomplete{background:#fff7e8;border:1px solid #f0dcb4;padding:12px 16px;margin:0 0 20px}.evaluation-incomplete p{margin:4px 0}.result-incomplete{background:#fff7e8;border-left:3px solid #c98a1b;padding:12px 16px;margin:16px 0}.gap-diagnosis{background:#fff5f2;border-left:3px solid #b42318;padding:12px 16px;margin:16px 0}.gap-diagnosis h3{margin:0 0 8px}.gap-diagnosis p{margin:6px 0}.gap-diagnosis small{color:#684b45}.evaluation-diagnosis{background:#f4f8f6;border:1px solid #d8e7df;padding:20px;margin:0 0 28px;break-inside:avoid}.evaluation-diagnosis h2{margin:5px 0 8px}.evaluation-diagnosis ol{padding-left:22px}.evaluation-diagnosis li{margin:8px 0}.evaluation-diagnosis-counts{display:flex;gap:18px;flex-wrap:wrap;font-size:13px}.evaluation-diagnosis-counts b{font-size:18px}.evaluation-diagnosis-limit{color:#586b66;font-size:12px}@media print{body{margin:20px;max-width:none}article{break-inside:avoid}}</style></head><body><header><h1>Evaluation report</h1><p>${escapeHtml(source?.name || 'Source document')} · ${escapeHtml(new Date(evaluation.createdAt).toLocaleString())}</p><p class="score">${escapeHtml(evaluation.score)}%</p><p>${evaluation.manual ? 'The tested agent’s answers were pasted from a manual test.' : 'The tested agent’s answers were generated through the configured model connection.'}</p></header>${evaluationSummaryMarkup(evaluation)}${evaluation.results.map(result).join('')}</body></html>`;
   const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([report], { type: 'text/html' })); link.download = `evaluation-report-${evaluation.createdAt.slice(0, 10)}.html`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 

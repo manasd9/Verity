@@ -879,6 +879,10 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
+// FlexAgent speaks a filler line ("One moment please…") when a tool is slow. An answer that is only
+// filler, or very short, probably lost its real text in capture. Keep in step with app.js.
+const FILLER_PHRASE = /\b(?:(?:one|just a|a) (?:moment|second|sec)|hold on|hang on|bear with me|let me (?:check|look|see|find)|(?:i'm |i am )?(?:checking|looking)(?: (?:that|this|into it|now))?)\b[^.!?…\n]{0,30}(?:[.!?…]+|$)/gi;
+function answerLooksIncomplete(answer) { return String(answer || '').replace(FILLER_PHRASE, '').trim().length < 40; }
 app.post('/api/evaluations/livekit', async (req, res, next) => {
   try {
     const { datasetId, targetConnectionId, controlConnectionId, answers } = req.body;
@@ -893,7 +897,7 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
     const results = [];
     for (const [index, item] of dataset.cases.entries()) {
       const answer = String(answers[index]).trim();
-      results.push({ case: item, answer, livekit: true, retrievedChunks: [], retrievalUnavailable: true, ...(await scoreAnswer(control, answer, item)) });
+      results.push({ case: item, answer, livekit: true, retrievedChunks: [], retrievalUnavailable: true, ...(answerLooksIncomplete(answer) ? { answerMayBeIncomplete: true } : {}), ...(await scoreAnswer(control, answer, item)) });
     }
     const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId, controlConnectionId, livekit: true, createdAt: new Date().toISOString(), results, score: Math.round(results.reduce((sum, item) => sum + Number(item.score || 0), 0) / results.length) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
@@ -901,4 +905,4 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
 });
 app.use((error, req, res, next) => { if (error.status) res.status(error.status); else res.status(400); res.json({ error: error.message || 'Request failed.' }); });
 if (require.main === module) app.listen(Number(process.env.PORT || 4173), '127.0.0.1', () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest };
+module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete };
