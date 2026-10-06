@@ -33,6 +33,11 @@ if (!process.env.APP_ENCRYPTION_KEY) {
 }
 const key = Buffer.from(process.env.APP_ENCRYPTION_KEY, 'hex');
 if (key.length !== 32) throw new Error('APP_ENCRYPTION_KEY must be 64 hexadecimal characters.');
+// Which code is running, so an open page can tell it is out of date and a saved run records the code that scored it.
+function gitOutput(args) { try { return require('node:child_process').execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim(); } catch { return null; } }
+const SERVER_VERSION = { commit: gitOutput(['rev-parse', '--short', 'HEAD']), uncommittedChanges: Boolean(gitOutput(['status', '--porcelain', '--untracked-files=no'])), startedAt: new Date().toISOString() };
+// The page files are read from disk on every request, so their stamp is taken live rather than at startup.
+function verityVersion() { const pageUpdatedAt = Math.max(...['index.html', 'app.js', 'styles.css'].map(file => { try { return fs.statSync(path.join(root, file)).mtimeMs; } catch { return 0; } })); return { ...SERVER_VERSION, pageUpdatedAt: new Date(pageUpdatedAt).toISOString() }; }
 
 function readStore() {
   const empty = { documents: [], technicalDocuments: [], websites: [], websiteSnapshots: [], chunks: [], chatChunks: [], connections: [], datasets: [], evaluations: [], chats: [], agentConfigs: [], flexAgentSession: null };
@@ -660,7 +665,8 @@ app.use(localRequestGuard);
 app.use(express.json({ limit: '1mb' }));
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')));
 for (const [route, file] of [['/', 'index.html'], ['/index.html', 'index.html'], ['/app.js', 'app.js'], ['/styles.css', 'styles.css'], ['/verity-logo.svg', 'verity-logo.svg']]) app.get(route, (req, res) => res.sendFile(path.join(root, file)));
-app.get('/api/state', (req, res) => { const store = readStore(); res.json({ documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), flexAgentSession: publicFlexAgentSession(store.flexAgentSession), datasets: store.datasets.map(dataset => publicDataset(store, dataset)), evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
+app.get('/api/version', (req, res) => res.json(verityVersion()));
+app.get('/api/state', (req, res) => { const store = readStore(); res.json({ version: verityVersion(), documents: store.documents.map(document => publicDocument(document, store.chunks)), technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({ ...document, retrieval: { status: store.chunks.some(chunk => chunk.documentId === document.id) ? 'ready' : 'unavailable' } })), websites: store.websites, websiteSnapshots: store.websiteSnapshots.map(snapshot => publicWebsiteSnapshot(snapshot, store.chunks)), connections: store.connections.map(publicConnection), flexAgentSession: publicFlexAgentSession(store.flexAgentSession), datasets: store.datasets.map(dataset => publicDataset(store, dataset)), evaluations: store.evaluations, chats: store.chats, agentConfigs: store.agentConfigs }); });
 app.post('/api/connections', async (req, res) => {
   const { name, role, baseUrl, model, apiKey } = req.body;
   if (![name, role, baseUrl, model, apiKey].every(Boolean) || !['target', 'control'].includes(role)) return res.status(400).json({ error: 'Name, role, base URL, model, and API key are required.' });
@@ -1048,7 +1054,7 @@ app.post('/api/evaluations', async (req, res, next) => {
       }
       const verdict = await scoreAnswer(control, answer, item); results.push({ case: item, answer, retrievedChunks: retrieved.map(({ vector, ...chunk }) => chunk), retrievalUnavailable: flexAgent, ...verdict });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), targetConnectionId, controlConnectionId, judge: judgeSettings(control), createdAt: new Date().toISOString(), results, ...evaluationScores(results) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: document.kind, ...(document.kind === 'website' ? { snapshotId: document.id } : {}), targetConnectionId, controlConnectionId, judge: judgeSettings(control), verity: SERVER_VERSION, createdAt: new Date().toISOString(), results, ...evaluationScores(results) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
@@ -1066,7 +1072,7 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
       const verdict = await scoreAnswer(control, answer, item);
       results.push({ case: item, answer, manual: true, retrievedChunks: [], retrievalUnavailable: true, ...verdict });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId: null, controlConnectionId, judge: judgeSettings(control), manual: true, createdAt: new Date().toISOString(), results, ...evaluationScores(results) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId: null, controlConnectionId, judge: judgeSettings(control), verity: SERVER_VERSION, manual: true, createdAt: new Date().toISOString(), results, ...evaluationScores(results) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
@@ -1097,10 +1103,10 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
       const answer = String(answers[index]).trim();
       results.push({ case: item, answer, livekit: true, retrievedChunks: [], retrievalUnavailable: true, ...((item.caseType === 'decline' ? answerIsOnlyFiller : answerLooksIncomplete)(answer) ? { answerMayBeIncomplete: true } : {}), ...(await scoreAnswer(control, answer, item)) });
     }
-    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId, controlConnectionId, judge: judgeSettings(control), livekit: true, createdAt: new Date().toISOString(), results, ...evaluationScores(results) };
+    const evaluation = { id: id('eval'), datasetId, documentKind: resolveDocument(store, dataset.documentId)?.kind, ...recordScope(dataset), ...(dataset.orgName ? { orgName: dataset.orgName, agentName: dataset.agentName } : {}), targetConnectionId, controlConnectionId, judge: judgeSettings(control), verity: SERVER_VERSION, livekit: true, createdAt: new Date().toISOString(), results, ...evaluationScores(results) };
     const latest = readStore(); latest.evaluations.unshift(evaluation); saveStore(latest); res.status(201).json(evaluation);
   } catch (error) { next(error); }
 });
 app.use((error, req, res, next) => { if (error.status) res.status(error.status); else res.status(400); res.json({ error: error.message || 'Request failed.' }); });
 if (require.main === module) app.listen(Number(process.env.PORT || 4173), '127.0.0.1', () => console.log(`Verity is running at http://127.0.0.1:${process.env.PORT || 4173}`));
-module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, answerIsOnlyFiller, judgeParams, judgeSettings, checkJudgeSupport, callModel, declineGenerationMessages, declineCases, declineCandidatePassages, checkDeclineCases, evaluationScores, scopedSources, sourceTopics, datasetCoverage, passageSections };
+module.exports = { app, encrypt, UNTRUSTED_SOURCE_NOTICE, fenceUntrusted, scoringMessages, technicalAnalysisMessages, datasetGenerationMessages, scoreAnswer, analyzeTechnicalDocument, saveStore, storePath, chunkText, chunkTechnicalText, chunkWebsiteText, cosineSimilarity, retrieveChunks, retrieveChatChunks, chatChunksForMessages, targetChatMessages, technicalTargetMessages, websiteTargetMessages, normalizeDatasetCase, sourceIndexedCases, sourcePassages, validateWebsiteCases, evaluationTurns, scoreExpectedMemory, gapDiagnosisForVerdict, parseScoredVerdict, multiTurnGapDiagnosis, parseSurveyFacts, parseTechnicalAnalysis, hasSourceEvidence, removeDocumentData, removeTechnicalDocumentData, removeWebsiteData, normalizeChat, appendChatMessage, appendSurveyFacts, publicConnection, publicFlexAgentSession, flexAgentRequest, flexAgentWidgetTokenRequest, answerLooksIncomplete, answerIsOnlyFiller, verityVersion, judgeParams, judgeSettings, checkJudgeSupport, callModel, declineGenerationMessages, declineCases, declineCandidatePassages, checkDeclineCases, evaluationScores, scopedSources, sourceTopics, datasetCoverage, passageSections };

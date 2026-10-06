@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test.mjs"
+    "dev": "node --watch server.js",
+    "test": "node test.mjs",
+    "check": "node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs"
   },
   "keywords": [],
   "author": "",

@@ -851,6 +851,36 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   const siteCoverage = datasetCoverage(site, { documentId: 'snap', cases: [{ question: 'q', expectedAnswer: 'a', sourceEvidence: 'FAQ', sourceUrl: 'https://a.example/faq' }] });
   assert.equal(siteCoverage.unit, 'pages'); assert.deepEqual(siteCoverage.sections.map(section => section.cases), [[], [1]]);
 }
+// Guardrails: one check command, a pre-commit hook that runs it, and LF line endings.
+{
+  const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;
+  assert.equal(scripts.check, 'node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs');
+  assert.equal(scripts.dev, 'node --watch server.js', 'the dev server restarts itself when server code changes');
+  assert.match(readFileSync('.githooks/pre-commit', 'utf8'), /^#!\/bin\/sh\n[\s\S]*\nnpm run check --silent\n$/);
+  assert.match(readFileSync('.gitattributes', 'utf8'), /^\* text=auto eol=lf$/m);
+}
+// Version: which code is running, and which code scored each run.
+{
+  const { verityVersion } = require('./server.js');
+  const version = verityVersion();
+  assert.deepEqual(Object.keys(version), ['commit', 'uncommittedChanges', 'startedAt', 'pageUpdatedAt']);
+  assert.match(version.commit, /^[0-9a-f]{7,}$/); assert.equal(typeof version.uncommittedChanges, 'boolean');
+  assert.ok(!Number.isNaN(Date.parse(version.startedAt))); assert.ok(!Number.isNaN(Date.parse(version.pageUpdatedAt)));
+  const versionCode = js.slice(js.indexOf('function versionChanged'), js.indexOf('\n', js.indexOf('function versionChanged')));
+  const labelCode = js.slice(js.indexOf('function verityLabel'), js.indexOf('\n', js.indexOf('function verityLabel')));
+  const { versionChanged, verityLabel } = new Function(`${versionCode}\n${labelCode}; return { versionChanged, verityLabel };`)();
+  const loaded = { startedAt: 'a', pageUpdatedAt: 'p' };
+  assert.equal(versionChanged(loaded, { startedAt: 'a', pageUpdatedAt: 'p' }), false);
+  assert.equal(versionChanged(loaded, { startedAt: 'b', pageUpdatedAt: 'p' }), true, 'a server restart means the page may be out of date');
+  assert.equal(versionChanged(loaded, { startedAt: 'a', pageUpdatedAt: 'q' }), true, 'changed page files mean the page is out of date');
+  assert.equal(versionChanged(null, loaded), false);
+  assert.equal(verityLabel({ commit: '1420322', uncommittedChanges: false }), 'Scored by Verity 1420322');
+  assert.equal(verityLabel({ commit: '1420322', uncommittedChanges: true }), 'Scored by Verity 1420322 with uncommitted changes');
+  assert.equal(verityLabel(undefined), '', 'runs from before this was recorded show nothing');
+  assert.match(js, /setInterval\(checkForNewVersion, 60000\)/); assert.match(js, /visibilitychange/);
+  assert.match(js, /verityLabel\(latest\.verity\)/); assert.match(js, /verityLabel\(evaluation\.verity\)/);
+  assert.equal(server.match(/judge: judgeSettings\(control\), verity: SERVER_VERSION, /g)?.length, 3, 'all three evaluation routes record the code version');
+}
 const listener = createServer(app);
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const originalFetch = globalThis.fetch;
@@ -914,6 +944,10 @@ try {
   assert.equal(run.body.agentName, 'Transit Planner');
   assert.equal(run.body.results[0].answerMayBeIncomplete, true, 'a very short LiveKit answer is flagged, not silently scored');
   assert.deepEqual(run.body.judge, { model: 'test-model', host: 'mock-model.example', reasoningEffort: 'medium', temperature: 0 });
+  assert.deepEqual(Object.keys(run.body.verity), ['commit', 'uncommittedChanges', 'startedAt'], 'each run records the code that scored it');
+  const versionResponse = await requestApp(listener, 'GET', '/api/version');
+  assert.equal(versionResponse.status, 200); assert.equal(versionResponse.body.startedAt, run.body.verity.startedAt);
+  assert.equal((await requestApp(listener, 'GET', '/api/state')).body.version.startedAt, run.body.verity.startedAt);
   const manualRun = await requestApp(listener, 'POST', '/api/evaluations/manual', { datasetId: dataset.body.id, controlConnectionId: control.body.id, answers: ['A transit trip plan.'] });
   assert.equal(manualRun.status, 201); assert.deepEqual(manualRun.body.judge, run.body.judge);
   assert.equal(control.body.judgeSupport.reasoningEffort, true); assert.equal(control.body.judgeSupport.temperature, true); assert.equal(control.body.secret, undefined);
