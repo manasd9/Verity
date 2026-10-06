@@ -62,6 +62,16 @@ const html = readFileSync('index.html', 'utf8');
 const css = readFileSync('styles.css', 'utf8');
 const js = readFileSync('app.js', 'utf8');
 const server = readFileSync('server.js', 'utf8');
+// Each top-level function is defined once: a later copy silently replaces an earlier one, and topLevel() reads the first.
+{
+  const counts = {};
+  for (const [, name] of js.matchAll(/^(?:async )?function (\w+)\(/gm)) counts[name] = (counts[name] || 0) + 1;
+  assert.deepEqual(
+    Object.keys(counts).filter(name => counts[name] > 1),
+    [],
+    'functions defined more than once in app.js',
+  );
+}
 
 // Pulls named top-level declarations out of Prettier-formatted source. Each starts at column 0 and runs until
 // the next line that starts at column 0 and is not a closing bracket. Works with LF and CRLF.
@@ -168,11 +178,10 @@ function requestDocument(listener, fields = {}, route = '/api/documents') {
 assert.match(html, /id="app"/);
 assert.match(js, /let uploadedDocument = null/);
 assert.match(js, /Customer chat/);
-assert.match(js, /Survey memory/);
 assert.match(js, /requestSubmit/);
 assert.match(js, /customer-question'\)\?\.focus/);
 assert.match(js, /activeChatId/);
-assert.match(js, /RECENT CHATS/);
+assert.match(js, /<span class="history-label">Recent chats<\/span>/);
 assert.match(js, /<aside class="chat-setup"><h2>Chat setup<\/h2>/);
 // While the agent answers, the bubble shows animated dots; replies keep their line breaks.
 assert.match(js, /<div class="bubble is-thinking" role="status" aria-label="Thinking">/);
@@ -184,7 +193,7 @@ assert.match(js, /if \(chatMessages\) chatMessages\.scrollTop = chatMessages\.sc
 assert.match(js, /input\.value = button\.textContent;\n\s+input\.focus\(\);/);
 // The empty state lives in #chat-messages and is hidden once a message is added.
 assert.match(css, /\.chat-window \.messages:has\(\.message\) \.chat-empty \{ display: none; \}/);
-assert.match(js, /Write a message/);
+assert.match(js, /placeholder="Ask a question…" aria-label="Message"/);
 assert.match(js, /file-drop"><label for="file-input">Upload document/);
 assert.match(js, /Golden datasets/);
 assert.match(js, /<aside class="datasets-generate"><h2>Generate a draft dataset<\/h2>/);

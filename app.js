@@ -283,86 +283,6 @@ function documents() {
     <aside class="sources-add"><div><h2>Add a source</h2><p>Your source becomes the evidence for datasets, chat, and every result.</p></div><div class="file-drop"><label for="file-input">Upload document</label><input id="file-input" type="file" accept=".pdf,.docx,.txt" /><p><strong>Choose a file</strong> to upload. PDF, DOCX, or TXT.</p></div><hr /><form id="website-form" class="sources-website"><div class="field"><label for="website-url">Public website URL</label><input id="website-url" required type="url" placeholder="https://example.com/help" /></div><button class="button button-secondary" type="submit">Crawl website</button><span id="website-status" class="help" aria-live="polite"></span><span class="help">Verity collects the page and its public links into a saved snapshot.</span></form></aside></div>`;
 }
 
-function technical() {
-  const documents = workspace.technicalDocuments || [];
-  const selected = documents.find(item => item.id === location.hash.split(':')[1]) || documents[0];
-  const list = documents
-    .map(
-      item =>
-        `<button class="blueprint-file ${item.id === selected?.id ? 'active' : ''} js-open-technical" data-id="${escapeHtml(item.id)}" type="button"><span class="document-icon">${escapeHtml(item.type)}</span><span><strong>${escapeHtml(item.name)}</strong><small>${item.characters.toLocaleString()} characters · ${item.analysisStatus === 'ready' ? 'Blueprint ready' : 'Analysis unavailable'}</small></span></button>`,
-    )
-    .join('');
-  const detail =
-    selected?.analysisStatus === 'ready'
-      ? technicalAnalysis(selected.analysis)
-      : selected
-        ? `<section class="blueprint-unavailable"><h2>Analysis unavailable</h2><p>${escapeHtml(selected.analysisError || 'Connect an OpenAI control model in Settings, then re-upload this document to create its blueprint.')}</p></section>`
-        : `<section class="blueprint-unavailable"><h2>Start with a technical document</h2><p>Upload an engineering PDF, DOCX, or TXT file. It stays separate from policy chat and evaluations.</p></section>`;
-  return `<div class="blueprint-top"><div><p class="breadcrumb">Your workspace <span>›</span> Technical Blueprint</p><div class="blueprint-title-row"><h1>Technical Blueprint</h1><span class="analysis-badge">● Source-grounded analysis</span></div><p>A plain-language map of how this system works.</p></div><div class="blueprint-actions"><label class="blueprint-search">⌕ <input id="technical-search" placeholder="Search this blueprint" aria-label="Search this blueprint" /></label><label class="button button-primary" for="technical-file-input">⇧ Upload technical document</label><input id="technical-file-input" type="file" accept=".pdf,.docx,.txt" /></div></div>
-    <section class="blueprint-at-glance"><span class="at-glance-icon">◒</span><span><b>At a glance</b><small>This blueprint explains the system, its decisions, connections, and what still needs confirmation.</small></span></section>
-    <div class="blueprint-layout"><aside class="blueprint-files"><h2>Documents</h2>${list || '<p>No technical documents yet.</p>'}</aside><main class="blueprint-detail">${detail}</main></div>`;
-}
-function technicalAnalysis(analysis) {
-  const evidence = value =>
-    `<details class="blueprint-evidence"><summary>Source evidence</summary><p>${escapeHtml(value)}</p></details>`;
-  const items = values =>
-    values?.length
-      ? `<ul>${values.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`
-      : '<p>Not specified in this document.</p>';
-  const pathway = item =>
-    /ticket|escalat|handoff|human/i.test(`${item.action} ${item.result}`)
-      ? 'Escalation'
-      : /api|call|live|query|service|data/i.test(`${item.action} ${item.result}`)
-        ? 'Data source'
-        : 'Knowledge or process';
-  const paths = [...new Map(analysis.flows.map(item => [pathway(item), item])).entries()];
-  const catalog = analysis.catalog || [];
-  const groups = catalog.reduce((result, item) => {
-    const name =
-      item.dependencies && item.dependencies !== 'Not specified.'
-        ? item.dependencies.split(/[;,]/)[0].trim()
-        : 'Functions & components';
-    (result[name] ||= []).push(item);
-    return result;
-  }, {});
-  const card = (icon, label, count, note, target) =>
-    `<a class="blueprint-stat" href="#${target}"><i>${icon}</i><span><b>${label}</b><strong>${count}</strong><small>${note}</small><em>View details →</em></span></a>`;
-  const pathCards = paths
-    .map(
-      ([label, item]) =>
-        `<article class="flow-path ${label === 'Escalation' ? 'escalation' : label === 'Data source' ? 'data-source' : ''}"><span>${label === 'Escalation' ? '↗' : label === 'Data source' ? '◈' : '▤'}</span><b>${escapeHtml(label)}</b><p>${escapeHtml(item.action)}</p><small>${escapeHtml(item.result)}</small>${evidence(item.sourceEvidence)}</article>`,
-    )
-    .join('');
-  const catalogMarkup = Object.entries(groups)
-    .map(
-      ([group, entries]) =>
-        `<section class="catalog-group"><h3>${escapeHtml(group)}</h3>${entries.map(item => `<details data-search="${escapeHtml(`${item.name} ${item.purpose} ${item.whenToCall} ${item.dependencies}`)}"><summary><span><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.whenToCall)}</small></span><i>⌄</i></summary><dl><div><dt>Purpose</dt><dd>${escapeHtml(item.purpose)}</dd></div><div><dt>Inputs</dt><dd>${escapeHtml(item.inputs || 'Not specified')}</dd></div><div><dt>Outputs</dt><dd>${escapeHtml(item.outputs || 'Not specified')}</dd></div></dl>${evidence(item.sourceEvidence)}</details>`).join('')}</section>`,
-    )
-    .join('');
-  return `<nav class="blueprint-tabs"><a href="#overview">Overview</a><a class="active" href="#how-it-works">How it works</a>${catalog.length ? '<a href="#apis">APIs & functions</a>' : ''}${analysis.examples?.length ? '<a href="#examples">Examples</a>' : ''}${analysis.overview.unknowns?.length ? '<a href="#questions">Open questions</a>' : ''}</nav>
-  <section id="overview" class="blueprint-purpose"><div><span class="eyebrow">SYSTEM SUMMARY</span><h2>${escapeHtml(analysis.overview.purpose)}</h2>${evidence(analysis.overview.sourceEvidence)}</div><div class="blueprint-stats">${card('◇', 'Systems', analysis.overview.systems.length, 'Components and data sources', 'how-it-works')}${catalog.length ? card('⌘', 'APIs & functions', catalog.length, 'Calls, tools, and services', 'apis') : ''}${card('▤', 'Key rules', analysis.overview.keyRules.length, 'Documented decisions', 'how-it-works')}${analysis.overview.unknowns?.length ? card('?', 'Open questions', analysis.overview.unknowns.length, 'Items needing confirmation', 'questions') : ''}</div></section>
-  <div class="blueprint-workspace"><section id="how-it-works" class="blueprint-flow-panel"><header><div><h2>How it works</h2><p>From a trigger to a final outcome, here is the path the document describes.</p></div><button class="js-show-overview" type="button">View source →</button></header><div class="flow-entry"><span>◎</span><b>Request or trigger</b><p>${escapeHtml(analysis.flows[0]?.trigger || 'A documented system event occurs.')}</p></div><div class="flow-arrow">↓</div><div class="flow-entry decision"><span>◉</span><b>Decision</b><p>The system selects the appropriate documented path.</p></div><div class="flow-branches">${pathCards || '<p>No branching path is documented.</p>'}</div><div class="flow-arrow">↓</div><div class="flow-entry result"><span>✓</span><b>Result</b><p>${escapeHtml(analysis.flows.at(-1)?.result || 'The documented outcome is returned.')}</p></div><div class="flow-details"><h3>All documented flows</h3>${analysis.flows.map((item, index) => `<details><summary><b>${index + 1}. ${escapeHtml(item.trigger)}</b><span>${escapeHtml(item.action)}</span></summary><p>${escapeHtml(item.result)}</p>${item.branch ? `<small>Condition: ${escapeHtml(item.branch)}</small>` : ''}${evidence(item.sourceEvidence)}</details>`).join('')}</div></section>
-  <aside>${catalog.length ? `<section id="apis" class="blueprint-api-panel"><header><h2>APIs & functions</h2><label>⌕ <input class="js-catalog-search" placeholder="Search functions" aria-label="Search functions" /></label></header>${catalogMarkup}</section>` : ''}${analysis.overview.unknowns?.length ? `<section id="questions" class="blueprint-questions"><h2>Needs confirmation</h2>${analysis.overview.unknowns.map(item => `<details><summary><span>□</span>${escapeHtml(item)}</summary><p>Confirm this detail before treating it as an implementation rule.</p></details>`).join('')}</section>` : ''}</aside></div>
-  ${analysis.examples?.length ? `<section id="examples" class="blueprint-example-panel"><h2>Examples</h2><p>Inputs and expected outcomes found in the document.</p>${analysis.examples.map(item => `<article><div><b>Input</b><p>${escapeHtml(item.input)}</p></div><span>→</span><div><b>System action / result</b><p>${escapeHtml(item.output)}</p></div>${evidence(item.sourceEvidence)}</article>`).join('')}</section>` : ''}`;
-}
-
-function technical() {
-  const documents = workspace.technicalDocuments || [];
-  const selected = documents.find(item => item.id === location.hash.split(':')[1]) || documents[0];
-  const detail =
-    selected?.analysisStatus === 'ready'
-      ? technicalAnalysis(selected.analysis)
-      : selected
-        ? `<section class="blueprint-unavailable"><h2>Analysis unavailable</h2><p>${escapeHtml(selected.analysisError || 'Connect an OpenAI control model in Settings, then re-upload this document to create its blueprint.')}</p></section>`
-        : `<section class="blueprint-unavailable"><h2>Start with a technical document</h2><p>Upload an engineering PDF, DOCX, or TXT file. It stays separate from policy chat and evaluations.</p></section>`;
-  const uploadStatus = technicalUploadStatus
-    ? `<p class="technical-upload-status ${technicalUploadStatus.kind}" role="status">${escapeHtml(technicalUploadStatus.message)}</p>`
-    : selected
-      ? `<p class="technical-upload-status ready" role="status">Blueprint ready: ${escapeHtml(selected.name)}</p>`
-      : '';
-  return `<div class="blueprint-simple-top"><div><div class="blueprint-title-row"><h1>Technical Blueprint</h1><span class="analysis-badge">Source-grounded</span></div><p>A plain-language guide to how this system works.</p>${selected ? `<p class="blueprint-document-name">Viewing: <strong>${escapeHtml(selected.name)}</strong></p>` : ''}${uploadStatus}</div><label class="button button-primary" for="technical-file-input">Upload document</label><input id="technical-file-input" type="file" accept=".pdf,.docx,.txt" /></div>${documents.length > 1 ? `<label class="blueprint-document-picker">Switch document <select id="technical-document-select">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selected?.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>` : ''}${detail}`;
-}
-
 function technicalAnalysis(analysis) {
   const evidence = value =>
     `<details class="blueprint-evidence"><summary>View source evidence</summary><p>${escapeHtml(value)}</p></details>`;
@@ -410,26 +330,6 @@ function technicalAnalysis(analysis) {
 }
 
 function technical() {
-  const documents = (workspace.technicalDocuments || []).filter(inSelectedWorkspace);
-  const selected = documents.find(item => item.id === location.hash.split(':')[1]) || documents[0];
-  const detail =
-    selected?.analysisStatus === 'ready'
-      ? technicalAnalysis(selected.analysis)
-      : selected
-        ? `<section class="blueprint-unavailable"><h2>Analysis unavailable</h2><p>${escapeHtml(selected.analysisError || 'Connect an OpenAI control model in Settings, then re-upload this document to create its blueprint.')}</p></section>`
-        : `<section class="blueprint-unavailable"><h2>Start with a technical document</h2><p>Upload an engineering PDF, DOCX, or TXT file.</p></section>`;
-  const uploadStatus = technicalUploadStatus
-    ? `<p class="technical-upload-status ${technicalUploadStatus.kind}" role="status">${escapeHtml(technicalUploadStatus.message)}</p>`
-    : selected
-      ? `<p class="technical-upload-status ready" role="status">Blueprint ready: ${escapeHtml(selected.name)}</p>`
-      : '';
-  const remove = documents.length
-    ? `<section class="technical-document-list"><h2 class="minor-title">Technical documents</h2><div class="document-list">${documents.map(item => `<div class="document-item"><span class="document-icon">${escapeHtml(item.type)}</span><span><strong>${escapeHtml(item.name)}</strong><small>${item.characters.toLocaleString()} characters extracted · ${item.retrieval?.status === 'ready' ? 'Retrieval ready.' : 'Needs indexing.'}</small></span><span class="document-actions"><button class="button button-secondary button-small js-open-technical" data-id="${escapeHtml(item.id)}" type="button">Open</button><button class="button button-secondary button-small js-remove-technical-document" data-id="${escapeHtml(item.id)}" data-name="${escapeHtml(item.name)}" type="button">Remove</button></span></div>`).join('')}</div></section>`
-    : '';
-  return `<div class="blueprint-simple-top"><div><div class="blueprint-title-row"><h1>Technical Blueprint</h1><span class="analysis-badge">Source-grounded</span></div><p>A plain-language guide to how this system works.</p>${selected ? `<p class="blueprint-document-name">Viewing: <strong>${escapeHtml(selected.name)}</strong></p>` : ''}${uploadStatus}</div><div class="button-row">${remove}<label class="button button-primary" for="technical-file-input">Upload document</label></div><input id="technical-file-input" type="file" accept=".pdf,.docx,.txt" /></div>${documents.length > 1 ? `<label class="blueprint-document-picker">Switch document <select id="technical-document-select">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selected?.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>` : ''}${detail}`;
-}
-
-function technical() {
   const documents = workspace.technicalDocuments || [];
   const selected = documents.find(item => item.id === location.hash.split(':')[1]) || documents[0];
   const detail =
@@ -450,25 +350,6 @@ function technical() {
     ? `<p class="technical-upload-status ${technicalUploadStatus.kind}" role="status">${escapeHtml(technicalUploadStatus.message)}</p>`
     : '';
   return `${header('Technical Blueprint', 'A plain-language guide to how a system works, taken from its technical document.')}<div class="blueprint-page"><div class="blueprint-main">${detail}</div><aside class="blueprint-rail" aria-label="Technical documents"><h2>Technical documents</h2><div class="blueprint-docs">${list}</div><label class="button button-primary" for="technical-file-input">Upload document</label><input id="technical-file-input" type="file" accept=".pdf,.docx,.txt" />${selected ? `<button class="button button-secondary js-source-dataset" data-id="${escapeHtml(selected.id)}" type="button">Generate dataset</button>` : ''}${status}</aside></div>`;
-}
-
-function datasets() {
-  const controls = workspace.connections.filter(connection => connection.role === 'control');
-  const documents = allDocuments();
-  const selectedDocumentId = documents.some(item => item.id === datasetDocumentId)
-    ? datasetDocumentId
-    : documents[0]?.id;
-  const ready = documents.length && controls.length;
-  const reviewing = workspace.datasets.find(dataset => dataset.id === reviewingDatasetId);
-  if (reviewing) return datasetReview(reviewing);
-  const drafts = workspace.datasets
-    .map(dataset => {
-      const document = documents.find(item => item.id === dataset.documentId);
-      return `<div class="document-item"><span class="document-icon">SET</span><span><strong>${escapeHtml(document?.name || 'Unknown source')} · ${dataset.cases.length} scenarios</strong><small>${dataset.status === 'approved' ? 'Approved benchmark' : 'Draft ready for your review'}</small></span>${dataset.status === 'approved' ? `<span class="dataset-action">${status('Approved', 'good')}<button class="button button-secondary button-small js-review-dataset" data-id="${escapeHtml(dataset.id)}" type="button">View dataset</button></span>` : `<button class="button button-primary button-small js-review-dataset" data-id="${escapeHtml(dataset.id)}" type="button">Review draft</button>`}</div>`;
-    })
-    .join('');
-  return `${header('Golden datasets', 'Your approved scenarios will define the correct standard for the target agent.')}
-    <div class="two-col"><section class="panel card-pad">${ready ? `<h2 class="minor-title">Generate a draft dataset</h2><form id="generate-form" class="form-grid"><div class="field"><label for="dataset-document">Source</label><select id="dataset-document">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selectedDocumentId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="dataset-count">Scenarios</label><input id="dataset-count" type="number" min="1" max="30" value="10" /></div><div class="field"><label for="dataset-decline-share">“Should decline” share (%)</label><input id="dataset-decline-share" type="number" min="0" max="50" value="20" /><span class="help">Questions the source does not answer, to check the agent says so instead of inventing details. 0 turns them off.</span></div><div class="field full"><label for="dataset-control">Control model</label><select id="dataset-control">${controls.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field full"><button class="button button-primary" type="submit">Generate draft scenarios</button><p id="generation-status" class="help" aria-live="polite">The control model will create a draft for you to review.</p></div></form>${drafts ? `<div class="document-list">${drafts}</div>` : ''}` : `<h2 class="minor-title">No golden datasets yet</h2><p class="page-subtitle">Add a source and a control-model connection in Settings first.</p>`}</section><aside class="callout"><h3>Your benchmark, not a guess</h3><p>Every approved case contains the customer scenario, expected outcome, required rules, and source evidence.</p></aside></div>`;
 }
 
 function reviewScenarioLabel(item) {
@@ -560,39 +441,6 @@ function datasetReview(dataset) {
     ? `<div class="button-row"><button class="button button-secondary" type="submit">Save changes</button><button class="button button-primary js-approve" data-id="${escapeHtml(dataset.id)}" type="button">Save & approve</button></div><p id="review-status" class="help" aria-live="polite">Write or verify the expected answer and evidence for every scenario before approving.</p>`
     : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
   return `${header('Review golden dataset', `${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'secondary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${declineCheckNote(dataset)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
-}
-
-function chat() {
-  const targets = workspace.connections.filter(
-    connection => connection.role === 'target' && connection.kind !== 'flexagent',
-  );
-  const documents = allDocuments();
-  const ready = documents.length && targets.length;
-  const active = workspace.chats.find(item => item.id === activeChatId);
-  const documentId = active?.documentId || chatDocumentId || documents[0]?.id;
-  const targetId = active?.connectionId || chatTargetId || targets[0]?.id;
-  const messages = active?.messages?.length
-    ? active.messages
-        .map(
-          message =>
-            `<article class="message ${message.role === 'user' ? 'user' : 'agent'}"><span class="who">${message.role === 'user' ? 'You' : 'Support agent'}</span><div class="bubble">${escapeHtml(message.content)}</div></article>`,
-        )
-        .join('')
-    : '<p class="chat-empty">Ask a question to begin the conversation.</p>';
-  const memory =
-    (active?.surveyMemory?.facts || [])
-      .map(
-        fact =>
-          `<li><strong>${escapeHtml(fact.kind === 'explicit' ? 'Answer' : 'Inference')}</strong> · ${escapeHtml(fact.value)} <small>${escapeHtml(fact.status)} · source ${escapeHtml(fact.sourceMessageId)}</small></li>`,
-      )
-      .join('') || '<li>No survey facts recorded yet.</li>';
-  const history = workspace.chats
-    .map(
-      item =>
-        `<button class="history-item ${item.id === activeChatId ? 'active' : ''} js-open-chat" data-id="${escapeHtml(item.id)}" type="button"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(documents.find(document => document.id === item.documentId)?.name || 'Source')}</small></button>`,
-    )
-    .join('');
-  return `${header('Customer chat', 'A live customer conversation, grounded in the selected source.')}${ready ? `<div class="chat-shell"><aside class="chat-history"><button class="button button-secondary js-new-chat" type="button">+ New chat</button><span class="history-label">RECENT CHATS</span>${history || '<p class="history-empty">Your conversations will appear here.</p>'}</aside><section class="panel chat-window"><div class="chat-title"><div><strong>Customer support</strong><span>Source-grounded agent</span></div><div class="chat-config"><label>Source<select id="chat-document">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === documentId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Agent<select id="chat-target">${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === targetId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label></div></div><details class="survey-memory"><summary>Survey memory</summary><ul>${memory}</ul></details><div id="chat-messages" class="messages">${messages}</div><form id="customer-chat-form" class="chat-compose"><textarea id="customer-question" required rows="1" placeholder="Write a message…" aria-label="Message"></textarea><button class="button button-primary" type="submit">Send</button></form></section></div>` : `<section class="panel card-pad"><h2 class="minor-title">Customer chat is not configured yet</h2><p class="page-subtitle">Add a source and the target agent in Settings first.</p></section>`}`;
 }
 
 function gapDiagnosisMarkup(result) {
