@@ -922,7 +922,7 @@ function datasets() {
       const source = documents.find(item => item.id === dataset.documentId);
       const approved = dataset.status === 'approved';
       const name = source?.name || 'Unknown document';
-      return `<article class="datasets-card ${approved ? '' : 'is-draft'}" style="--i: ${index}"><span><strong title="${escapeHtml(name).replace(/"/g, '&quot;')}">${escapeHtml(name)}</strong><small>${source ? `${escapeHtml(kindLabel(source))} · ` : ''}${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'}</small></span><span class="datasets-state ${approved ? '' : 'warn'}">${approved ? 'Approved' : 'Needs review'}</span><div class="datasets-card-actions"><button class="button ${approved ? 'button-secondary' : 'button-primary'} button-small js-review-dataset" data-id="${escapeHtml(dataset.id)}" type="button">${approved ? 'View dataset' : 'Review draft'}</button></div></article>`;
+      return `<article class="datasets-card ${approved ? '' : 'is-draft'}" style="--i: ${index}"><span><strong title="${escapeHtml(name).replace(/"/g, '&quot;')}">${escapeHtml(name)}</strong><small>${source ? `${escapeHtml(kindLabel(source))} · ` : ''}${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'}</small></span><span class="datasets-state ${approved ? '' : 'warn'}">${approved ? 'Approved' : 'Needs review'}</span><div class="datasets-card-actions"><button class="button ${approved ? 'button-secondary' : 'button-primary'} button-small js-review-dataset" data-id="${escapeHtml(dataset.id)}" type="button">${approved ? 'View dataset' : 'Review draft'}</button><button class="datasets-quiet js-remove-dataset" data-id="${escapeHtml(dataset.id)}" type="button">Remove</button></div></article>`;
     })
     .join('');
   const library =
@@ -985,7 +985,7 @@ function render(page = location.hash.slice(1).split(':')[0] || 'home') {
   if (!canWriteWorkspace())
     app
       .querySelectorAll(
-        '#file-input, #technical-file-input, #website-form input, #website-form button, #generate-form button, .manual-evaluation-form button, .js-source-dataset, .js-remove-document, .js-recrawl-website, .js-remove-website, .js-remove-technical-document, .js-approve, .js-add-scenario, .js-delete-scenario, #dataset-review-form button[type="submit"], #dataset-review-form textarea, #dataset-review-form input',
+        '#file-input, #technical-file-input, .js-remove-dataset, #website-form input, #website-form button, #generate-form button, .manual-evaluation-form button, .js-source-dataset, .js-remove-document, .js-recrawl-website, .js-remove-website, .js-remove-technical-document, .js-approve, .js-add-scenario, .js-delete-scenario, #dataset-review-form button[type="submit"], #dataset-review-form textarea, #dataset-review-form input',
       )
       .forEach(input => {
         input.disabled = true;
@@ -1197,6 +1197,9 @@ function bind(page) {
   document.querySelector('#dataset-document')?.addEventListener('change', event => {
     datasetDocumentId = event.target.value;
   });
+  document
+    .querySelectorAll('.js-remove-dataset')
+    .forEach(button => button.addEventListener('click', () => removeDataset(button.dataset.id)));
   document.querySelectorAll('.js-review-dataset').forEach(button =>
     button.addEventListener('click', () => {
       reviewingDatasetId = button.dataset.id;
@@ -1446,6 +1449,29 @@ async function removeDocument(id) {
   }
 }
 
+async function removeDataset(id) {
+  const dataset = workspace.datasets.find(item => item.id === id);
+  const name = allDocuments().find(item => item.id === dataset?.documentId)?.name || 'Unknown document';
+  const runs = workspace.evaluations.filter(item => item.datasetId === id).length;
+  const runNote = runs ? ` and its ${runs} evaluation ${runs === 1 ? 'run' : 'runs'}` : '';
+  if (!confirm(`This permanently removes the golden dataset for "${name}"${runNote}. Continue?`)) return;
+  try {
+    const response = await fetch(`/api/datasets/${id}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.error);
+    }
+    workspace.datasets = workspace.datasets.filter(item => item.id !== id);
+    workspace.evaluations = workspace.evaluations.filter(item => item.datasetId !== id);
+    if (reviewingDatasetId === id) reviewingDatasetId = null;
+    if (viewingEvaluationId && !workspace.evaluations.some(item => item.id === viewingEvaluationId))
+      viewingEvaluationId = null;
+    render('datasets');
+    toast(runs ? 'Golden dataset and its evaluation runs removed.' : 'Golden dataset removed.');
+  } catch (error) {
+    toast(error.message || 'Golden dataset could not be removed.');
+  }
+}
 async function removeTechnicalDocument(id) {
   const name = workspace.technicalDocuments.find(item => item.id === id)?.name;
   if (!name) return;

@@ -190,6 +190,10 @@ assert.match(js, /Golden datasets/);
 assert.match(js, /<aside class="datasets-generate"><h2>Generate a draft dataset<\/h2>/);
 assert.match(js, /\$\{approved \? 'Approved' : 'Needs review'\}/);
 assert.doesNotMatch(js, /YOUR BENCHMARKS/);
+// Each dataset card can be removed; the page confirms first and greys the button out without write access.
+assert.match(js, /<button class="datasets-quiet js-remove-dataset" data-id=/);
+assert.match(js, /This permanently removes the golden dataset for/);
+assert.match(js, /'#file-input, #technical-file-input, \.js-remove-dataset, /);
 // The review screen has one secondary "Back to datasets" and Go to evaluation as its main action.
 assert.equal(js.match(/button\('Back to datasets'/g).length, 1);
 assert.match(js, /button\('Back to datasets', 'secondary', 'js-close-review'\)/);
@@ -2767,6 +2771,20 @@ try {
   });
   assert.equal(fullRun.status, 201);
   assert.equal(fullRun.body.results[0].answerMayBeIncomplete, undefined);
+  // Removing a golden dataset also removes the evaluation runs made with it; nothing else is touched.
+  assert.equal((await requestApp(listener, 'DELETE', '/api/datasets/dataset_missing')).status, 404);
+  assert.equal((await requestApp(listener, 'DELETE', `/api/datasets/${mixed.body.id}`)).status, 204);
+  const afterDatasetRemoval = (await requestApp(listener, 'GET', '/api/state')).body;
+  assert.equal(
+    afterDatasetRemoval.datasets.some(item => item.id === mixed.body.id),
+    false,
+  );
+  assert.equal(
+    afterDatasetRemoval.evaluations.some(item => item.datasetId === mixed.body.id),
+    false,
+  );
+  assert.ok(afterDatasetRemoval.datasets.some(item => item.id === noDeclines.body.id));
+  assert.ok(afterDatasetRemoval.evaluations.some(item => item.id === fullRun.body.id));
   const testStorePath = path.join(testDataDir, 'store.json');
   const websiteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
   websiteStore.websiteSnapshots.push({
@@ -2812,6 +2830,11 @@ try {
   assert.equal(websiteRun.body.documentKind, 'website');
   await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000004' });
   assert.equal((await requestApp(listener, 'DELETE', `/api/documents/${scopedDocument.body.id}`)).status, 400);
+  assert.equal(
+    (await requestApp(listener, 'DELETE', '/api/datasets/dataset_website_test')).status,
+    400,
+    "another agent's dataset cannot be removed",
+  );
   const mismatchedDataset = await requestApp(listener, 'POST', '/api/datasets/generate', {
     documentId: scopedDocument.body.id,
     connectionId: control.body.id,

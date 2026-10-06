@@ -2070,6 +2070,21 @@ app.post('/api/datasets/:id/approve', (req, res) => {
   saveStore(store);
   res.json(publicDataset(store, dataset));
 });
+// Removes a golden dataset and the evaluation runs made with it; its source and other datasets stay.
+app.delete('/api/datasets/:id', (req, res, next) => {
+  try {
+    const store = readStore();
+    const dataset = store.datasets.find(item => item.id === req.params.id);
+    if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+    if (recordScope(dataset)) requestedScope(store, dataset);
+    store.datasets = store.datasets.filter(item => item.id !== dataset.id);
+    store.evaluations = store.evaluations.filter(item => item.datasetId !== dataset.id);
+    saveStore(store);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
 app.post('/api/evaluations', async (req, res, next) => {
   try {
     const { datasetId, targetConnectionId, controlConnectionId } = req.body;

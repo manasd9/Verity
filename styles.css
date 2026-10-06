@@ -294,6 +294,9 @@ a { color: inherit; text-decoration: none; }
 .datasets-card small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
 .datasets-card-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .datasets-card .button { white-space: nowrap; }
+.datasets-quiet { padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.datasets-quiet:hover { background: #fbe9e7; color: var(--danger); }
+.datasets-quiet:disabled { opacity: .45; cursor: not-allowed; background: transparent; color: var(--muted); }
 .datasets-state { padding: 3px 9px; border-radius: 999px; background: #e2efea; color: var(--green); font-size: 11px; font-weight: 700; white-space: nowrap; }
 .datasets-state.warn { background: #fbefd9; color: #8a5a10; }
 .datasets-empty { padding: 26px 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); }
