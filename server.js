@@ -18,6 +18,7 @@ const DEFAULT_TARGET_PROMPT =
   'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.';
 
 const root = __dirname;
+const { answerLooksIncomplete, answerIsOnlyFiller } = require('./shared/answer-checks.js');
 const dataDir = process.env.EVAL_TOOL_DATA_DIR || path.join(root, 'data');
 const storePath = path.join(dataDir, 'store.json');
 const envPath = path.join(root, '.env');
@@ -1300,6 +1301,7 @@ app.get('/vendor/livekit-client.js', (req, res) =>
 for (const [route, file] of [
   ['/', 'index.html'],
   ['/index.html', 'index.html'],
+  ['/shared/answer-checks.js', 'shared/answer-checks.js'],
   ['/app.js', 'app.js'],
   ['/styles.css', 'styles.css'],
   ['/verity-logo.svg', 'verity-logo.svg'],
@@ -2251,10 +2253,6 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
     next(error);
   }
 });
-// FlexAgent speaks a filler line ("One moment please…") when a tool is slow. An answer that is only
-// filler, or very short, probably lost its real text in capture. Keep in step with app.js.
-const FILLER_PHRASE =
-  /\b(?:(?:one|just a|a) (?:moment|second|sec)|hold on|hang on|bear with me|let me (?:check|look|see|find)|(?:i'm |i am )?(?:checking|looking)(?: (?:that|this|into it|now))?)\b[^.!?…\n]{0,30}(?:[.!?…]+|$)/gi;
 // Overall score plus "answers when it should" and "declines when it should" for runs that mix both kinds of case.
 function evaluationScores(results) {
   const average = items => Math.round(items.reduce((sum, item) => sum + Number(item.score || 0), 0) / items.length);
@@ -2267,20 +2265,6 @@ function evaluationScores(results) {
       : {}),
   };
 }
-function answerLooksIncomplete(answer) {
-  return (
-    String(answer || '')
-      .replace(FILLER_PHRASE, '')
-      .trim().length < 40
-  );
-}
-function answerIsOnlyFiller(answer) {
-  return (
-    String(answer || '')
-      .replace(FILLER_PHRASE, '')
-      .trim().length === 0
-  );
-} // A correct decline can be short; a filler line alone is still an unfinished answer.
 app.post('/api/evaluations/livekit', async (req, res, next) => {
   try {
     const { datasetId, targetConnectionId, controlConnectionId, answers } = req.body;

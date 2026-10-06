@@ -7,8 +7,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node test.mjs",
-    "format": "prettier --write server.js app.js test.mjs website-crawler.js",
-    "check": "prettier --check server.js app.js test.mjs website-crawler.js && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs"
+    "format": "prettier --write server.js app.js test.mjs website-crawler.js shared",
+    "check": "prettier --check server.js app.js test.mjs website-crawler.js shared && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs"
   },
   "keywords": [],
   "author": "",

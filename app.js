@@ -1781,24 +1781,6 @@ const LIVEKIT_SHORT_REPLY_QUIET_MS = 20000; // Longer quiet time while everythin
 const LIVEKIT_ANSWER_TIMEOUT_MS = 90000;
 const LIVEKIT_GREETING_START_MS = 3000; // Send the question anyway if no greeting starts within this time.
 const LIVEKIT_GREETING_MAX_MS = 30000;
-// FlexAgent speaks a filler line ("One moment please…") when a tool is slow. Keep in step with server.js.
-const FILLER_PHRASE =
-  /\b(?:(?:one|just a|a) (?:moment|second|sec)|hold on|hang on|bear with me|let me (?:check|look|see|find)|(?:i'm |i am )?(?:checking|looking)(?: (?:that|this|into it|now))?)\b[^.!?…\n]{0,30}(?:[.!?…]+|$)/gi;
-function answerLooksIncomplete(answer) {
-  return (
-    String(answer || '')
-      .replace(FILLER_PHRASE, '')
-      .trim().length < 40
-  );
-}
-function answerIsOnlyFiller(answer) {
-  return (
-    String(answer || '')
-      .replace(FILLER_PHRASE, '')
-      .trim().length === 0
-  );
-} // A correct decline can be short; a filler line alone is still an unfinished answer.
-
 // FlexAgent greets each new visitor. Waits until that greeting ends (listening after thinking or speaking)
 // so it is not taken as the answer; sends anyway if no greeting starts soon.
 function waitForLiveKitGreeting(

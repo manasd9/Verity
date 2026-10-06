@@ -718,7 +718,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     answerIsOnlyFiller: browserOnlyFiller,
     LIVEKIT_QUIET_MS,
   } = new Function(
-    `${js.slice(start, end)}; return { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete, answerIsOnlyFiller, LIVEKIT_QUIET_MS };`,
+    `${readFileSync('shared/answer-checks.js', 'utf8')}\n${js.slice(start, end)}; return { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete, answerIsOnlyFiller, LIVEKIT_QUIET_MS };`,
   )();
   assert.equal(LIVEKIT_QUIET_MS, 5000);
   const events = { ParticipantAttributesChanged: 'attributes' };
@@ -969,6 +969,14 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     assert.equal(browserOnlyFiller(answer), onlyFiller, answer);
     assert.equal(answerIsOnlyFiller(answer), onlyFiller, answer);
   }
+  // One copy of the answer checks: the page and the server load the same shared file.
+  assert.doesNotMatch(js, /FILLER_PHRASE =/, 'app.js uses the shared answer checks');
+  assert.doesNotMatch(server, /FILLER_PHRASE =/, 'server.js uses the shared answer checks');
+  assert.match(server, /require\('\.\/shared\/answer-checks\.js'\)/);
+  assert.ok(
+    html.indexOf('src="shared/answer-checks.js"') < html.indexOf('src="app.js"'),
+    'the page loads the shared checks before app.js',
+  );
   // Short or filler-like answers are flagged the same way in the browser and on the server.
   for (const [answer, incomplete] of [
     ['One moment please...', true],
@@ -2168,9 +2176,9 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;
   assert.equal(
     scripts.check,
-    'prettier --check server.js app.js test.mjs website-crawler.js && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs',
+    'prettier --check server.js app.js test.mjs website-crawler.js shared && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs',
   );
-  assert.equal(scripts.format, 'prettier --write server.js app.js test.mjs website-crawler.js');
+  assert.equal(scripts.format, 'prettier --write server.js app.js test.mjs website-crawler.js shared');
   assert.equal(scripts.dev, 'node --watch server.js', 'the dev server restarts itself when server code changes');
   assert.match(readFileSync('.githooks/pre-commit', 'utf8'), /^#!\/bin\/sh\n[\s\S]*\nnpm run check --silent\n$/);
   assert.match(readFileSync('.gitattributes', 'utf8'), /^\* text=auto eol=lf$/m);
@@ -2431,6 +2439,9 @@ try {
     ['commit', 'uncommittedChanges', 'startedAt'],
     'each run records the code that scored it',
   );
+  const sharedScript = await rawRequest(listener, { path: '/shared/answer-checks.js' });
+  assert.equal(sharedScript.status, 200);
+  assert.match(sharedScript.body, /function answerLooksIncomplete/);
   const versionResponse = await requestApp(listener, 'GET', '/api/version');
   assert.equal(versionResponse.status, 200);
   assert.equal(versionResponse.body.startedAt, run.body.verity.startedAt);
