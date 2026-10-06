@@ -1302,6 +1302,7 @@ for (const [route, file] of [
   ['/', 'index.html'],
   ['/index.html', 'index.html'],
   ['/shared/answer-checks.js', 'shared/answer-checks.js'],
+  ['/ui/livekit-capture.js', 'ui/livekit-capture.js'],
   ['/app.js', 'app.js'],
   ['/styles.css', 'styles.css'],
   ['/verity-logo.svg', 'verity-logo.svg'],

@@ -208,8 +208,11 @@ assert.match(
   /liveKitAnswer\(targetConnectionId, item\.question, \{ expectShortReply: isDecline\(item\) \}\)/,
   'should-decline cases do not wait 20 s for a short reply',
 );
-assert.match(js, /const LIVEKIT_ANSWER_TIMEOUT_MS = 90000;/);
-assert.match(js, /FlexAgent did not return a final answer within \$\{timeoutMs \/ 1000\} seconds/);
+assert.equal(require('./ui/livekit-capture.js').LIVEKIT_ANSWER_TIMEOUT_MS, 90000);
+assert.match(
+  readFileSync('ui/livekit-capture.js', 'utf8'),
+  /FlexAgent did not return a final answer within \$\{timeoutMs \/ 1000\} seconds/,
+);
 assert.match(server, /app\.post\('\/api\/openai-setup'/);
 assert.match(server, /app\.delete\('\/api\/connections\/:id'/);
 assert.match(server, /app\.put\('\/api\/connections\/:id\/prompt'/);
@@ -709,17 +712,11 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
 
 // LiveKit answer capture (app.js): replay FlexAgent's agent-state and transcription sequence against a fake room.
 {
-  const start = js.indexOf('const LIVEKIT_QUIET_MS');
-  const end = js.indexOf('async function liveKitAnswer');
+  const { waitForLiveKitGreeting, collectLiveKitAnswer, LIVEKIT_QUIET_MS } = require('./ui/livekit-capture.js');
   const {
-    waitForLiveKitGreeting,
-    collectLiveKitAnswer,
     answerLooksIncomplete: browserLooksIncomplete,
     answerIsOnlyFiller: browserOnlyFiller,
-    LIVEKIT_QUIET_MS,
-  } = new Function(
-    `${readFileSync('shared/answer-checks.js', 'utf8')}\n${js.slice(start, end)}; return { waitForLiveKitGreeting, collectLiveKitAnswer, answerLooksIncomplete, answerIsOnlyFiller, LIVEKIT_QUIET_MS };`,
-  )();
+  } = require('./shared/answer-checks.js');
   assert.equal(LIVEKIT_QUIET_MS, 5000);
   const events = { ParticipantAttributesChanged: 'attributes' };
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -974,8 +971,17 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   assert.doesNotMatch(server, /FILLER_PHRASE =/, 'server.js uses the shared answer checks');
   assert.match(server, /require\('\.\/shared\/answer-checks\.js'\)/);
   assert.ok(
-    html.indexOf('src="shared/answer-checks.js"') < html.indexOf('src="app.js"'),
-    'the page loads the shared checks before app.js',
+    html.indexOf('src="shared/answer-checks.js"') < html.indexOf('src="ui/livekit-capture.js"'),
+    'the capture uses the shared checks, so they load first',
+  );
+  assert.ok(
+    html.indexOf('src="ui/livekit-capture.js"') < html.indexOf('src="app.js"'),
+    'app.js uses the capture, so it loads first',
+  );
+  assert.doesNotMatch(
+    js,
+    /function collectLiveKitAnswer|const LIVEKIT_QUIET_MS/,
+    'the capture lives in ui/livekit-capture.js only',
   );
   // Short or filler-like answers are flagged the same way in the browser and on the server.
   for (const [answer, incomplete] of [
@@ -2176,9 +2182,9 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;
   assert.equal(
     scripts.check,
-    'prettier --check server.js app.js test.mjs website-crawler.js shared && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs',
+    'prettier --check server.js app.js test.mjs website-crawler.js shared ui && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs',
   );
-  assert.equal(scripts.format, 'prettier --write server.js app.js test.mjs website-crawler.js shared');
+  assert.equal(scripts.format, 'prettier --write server.js app.js test.mjs website-crawler.js shared ui');
   assert.equal(scripts.dev, 'node --watch server.js', 'the dev server restarts itself when server code changes');
   assert.match(readFileSync('.githooks/pre-commit', 'utf8'), /^#!\/bin\/sh\n[\s\S]*\nnpm run check --silent\n$/);
   assert.match(readFileSync('.gitattributes', 'utf8'), /^\* text=auto eol=lf$/m);
@@ -2439,6 +2445,9 @@ try {
     ['commit', 'uncommittedChanges', 'startedAt'],
     'each run records the code that scored it',
   );
+  const captureScript = await rawRequest(listener, { path: '/ui/livekit-capture.js' });
+  assert.equal(captureScript.status, 200);
+  assert.match(captureScript.body, /function collectLiveKitAnswer/);
   const sharedScript = await rawRequest(listener, { path: '/shared/answer-checks.js' });
   assert.equal(sharedScript.status, 200);
   assert.match(sharedScript.body, /function answerLooksIncomplete/);
