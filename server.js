@@ -502,8 +502,14 @@ function parseScoredVerdict(raw) {
   )
     throw new Error('Control model returned an invalid evaluation verdict.');
   verdict.score = Number(verdict.score);
-  verdict.missingPoints = Array.isArray(verdict.missingPoints) ? verdict.missingPoints : [];
-  verdict.forbiddenClaims = Array.isArray(verdict.forbiddenClaims) ? verdict.forbiddenClaims : [];
+  if (
+    ![verdict.missingPoints, verdict.forbiddenClaims].every(
+      points => Array.isArray(points) && points.every(point => typeof point === 'string'),
+    )
+  )
+    throw new Error(
+      'Control model returned an invalid evaluation verdict: missingPoints and forbiddenClaims must be arrays of strings.',
+    );
   verdict.rationale = typeof verdict.rationale === 'string' ? verdict.rationale : '';
   delete verdict.gapDiagnosis;
   return verdict;
@@ -1266,6 +1272,18 @@ async function checkDeclineCases(store, source, control, cases) {
   );
   const results = JSON.parse(raw).results;
   if (!Array.isArray(results)) throw new Error('The control model did not return a check result.');
+  if (
+    results.length !== cases.length ||
+    !results.every(
+      item =>
+        Number.isInteger(item?.question) &&
+        item.question >= 1 &&
+        item.question <= cases.length &&
+        typeof item.answered === 'boolean',
+    ) ||
+    new Set(results.map(item => item.question)).size !== cases.length
+  )
+    throw new Error('The control model must return one valid check result for every question.');
   const answered = new Set(results.filter(item => item.answered === true).map(item => Number(item.question) - 1));
   return {
     kept: cases.filter((item, index) => !answered.has(index)),

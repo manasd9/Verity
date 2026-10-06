@@ -1677,6 +1677,15 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     assert.equal(strict.pass, true);
     assert.equal(strict.judgePass, false);
     assert.equal(strict.gapDiagnosis, undefined);
+    // Missing or malformed point lists must not turn a failed verdict into PASS.
+    judgeReply = { score: 0, pass: false, rationale: 'Required information is missing.' };
+    await assert.rejects(() => scoreAnswer(judge, attack, rubric), /invalid evaluation verdict/);
+    for (const field of ['missingPoints', 'forbiddenClaims']) {
+      for (const invalid of [undefined, null, '', {}, [null], [1]]) {
+        judgeReply = { score: 0, pass: false, missingPoints: [], forbiddenClaims: [], [field]: invalid };
+        await assert.rejects(() => scoreAnswer(judge, attack, rubric), /invalid evaluation verdict/);
+      }
+    }
   } finally {
     globalThis.fetch = savedFetch;
   }
@@ -2040,12 +2049,47 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     globalThis.fetch = async (url, init) =>
       String(url).endsWith('/embeddings')
         ? new Response('no embeddings here', { status: 404 })
-        : new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ results: [] }) } }] }), {
-            status: 200,
-          });
+        : new Response(
+            JSON.stringify({
+              choices: [{ message: { content: JSON.stringify({ results: [{ question: 1, answered: false }] }) } }],
+            }),
+            {
+              status: 200,
+            },
+          );
     const fallback = await checkDeclineCases(store, store.documents[0], control, [decline]);
     assert.deepEqual(fallback.keywordOnlySources, ['Amenities.pdf', 'Rooftop.pdf']);
     assert.equal(fallback.kept.length, 1);
+    // Every question needs a unique, in-range number and an explicit boolean decision.
+    for (const results of [
+      [],
+      [{ question: 1, answered: false }],
+      [
+        { question: 1, answered: false },
+        { question: 1, answered: true },
+      ],
+      [
+        { question: 1, answered: false },
+        { question: 3, answered: false },
+      ],
+      [{ question: 1, answered: false }, { question: 2 }],
+      [
+        { question: 1, answered: false },
+        { question: 2, answered: 'false' },
+      ],
+      [{ question: 1, answered: false }, null],
+    ]) {
+      globalThis.fetch = async url =>
+        String(url).endsWith('/embeddings')
+          ? new Response('no embeddings here', { status: 404 })
+          : new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ results }) } }] }), {
+              status: 200,
+            });
+      await assert.rejects(
+        () => checkDeclineCases(store, store.documents[0], control, [decline, decline]),
+        /one valid check result for every question/,
+      );
+    }
   } finally {
     globalThis.fetch = savedFetch;
   }
