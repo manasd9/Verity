@@ -7,8 +7,9 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node test.mjs",
-    "format": "prettier --write server.js app.js test.mjs website-crawler.js shared ui",
-    "check": "prettier --check server.js app.js test.mjs website-crawler.js shared ui && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs"
+    "format": "prettier --write server.js app.js test.mjs website-crawler.js shared ui scripts",
+    "compare-render": "node scripts/compare-render.js",
+    "check": "prettier --check server.js app.js test.mjs website-crawler.js shared ui scripts && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs"
   },
   "keywords": [],
   "author": "",

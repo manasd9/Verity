@@ -2226,12 +2226,49 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;
   assert.equal(
     scripts.check,
-    'prettier --check server.js app.js test.mjs website-crawler.js shared ui && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs',
+    'prettier --check server.js app.js test.mjs website-crawler.js shared ui scripts && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs',
   );
-  assert.equal(scripts.format, 'prettier --write server.js app.js test.mjs website-crawler.js shared ui');
+  assert.equal(scripts.format, 'prettier --write server.js app.js test.mjs website-crawler.js shared ui scripts');
   assert.equal(scripts.dev, 'node --watch server.js', 'the dev server restarts itself when server code changes');
   assert.match(readFileSync('.githooks/pre-commit', 'utf8'), /^#!\/bin\/sh\n[\s\S]*\nnpm run check --silent\n$/);
   assert.match(readFileSync('.gitattributes', 'utf8'), /^\* text=auto eol=lf$/m);
+}
+// Page comparison: renders every page with two sets of page scripts and reports pages whose HTML differs.
+{
+  const { pageScripts, compareRenders } = require('./scripts/compare-render.js');
+  assert.equal(
+    JSON.parse(readFileSync('package.json', 'utf8')).scripts['compare-render'],
+    'node scripts/compare-render.js',
+  );
+  const scripts = pageScripts(html);
+  assert.deepEqual(
+    scripts,
+    ['shared/answer-checks.js', 'ui/livekit-capture.js', 'app.js'],
+    'page scripts in load order, vendor libraries left out',
+  );
+  const sources = scripts.map(file => readFileSync(file, 'utf8'));
+  const empty = {
+    documents: [],
+    technicalDocuments: [],
+    websites: [],
+    websiteSnapshots: [],
+    connections: [],
+    flexAgentSession: null,
+    datasets: [],
+    evaluations: [],
+    chats: [],
+    agentConfigs: [],
+  };
+  const same = compareRenders(sources, sources, empty);
+  assert.ok(same.compared >= 16);
+  assert.deepEqual(same.differences, []);
+  assert.ok(
+    Object.values(same.current).some(page => page.includes('Golden datasets')),
+    'pages really render',
+  );
+  assert.ok(!Object.values(same.current).some(page => page.startsWith('ERROR')));
+  const changed = sources.map(source => source.replaceAll('Golden datasets', 'Benchmarks'));
+  assert.ok(compareRenders(sources, changed, empty).differences.length > 0, 'a one-word change is caught');
 }
 // Version: which code is running, and which code scored each run.
 {
