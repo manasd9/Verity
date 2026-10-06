@@ -327,6 +327,8 @@ assert.match(js, /Rubric/);
 assert.match(js, /FlexAgent target/);
 assert.match(js, /flexagent-form/);
 assert.match(js, /Connect FlexAgent/);
+// Submit handlers find their button by type, so a button earlier in the form (a styleable select's) cannot hijack it.
+assert.doesNotMatch(js, /querySelector\('button'\)/, 'find a form\'s submit button with button[type="submit"]');
 // Settings: vertical tab rail; Up/Down move between tabs like Left/Right.
 assert.match(js, /role="tablist" aria-label="Settings sections" aria-orientation="vertical"/);
 assert.match(js, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'\]/);

@@ -1502,7 +1502,7 @@ async function removeTechnicalDocument(id) {
 
 async function crawlWebsiteSource(event) {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button');
+  const button = event.currentTarget.querySelector('button[type="submit"]');
   const status = document.querySelector('#website-status');
   const url = document.querySelector('#website-url').value.trim();
   button.disabled = true;
@@ -1670,7 +1670,7 @@ function enhanceFlexAgentSettings() {
 
 async function connectFlexAgent(event) {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button');
+  const button = event.currentTarget.querySelector('button[type="submit"]');
   button.disabled = true;
   button.textContent = 'Connecting…';
   const data = {
@@ -1876,7 +1876,7 @@ async function runLiveKitEvaluation(datasetId, targetConnectionId, controlConnec
 
 async function saveAgentPrompt(event) {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button');
+  const button = event.currentTarget.querySelector('button[type="submit"]');
   const documentId = document.querySelector('#instruction-document').value;
   const connectionId = document.querySelector('#instruction-target').value;
   button.disabled = true;
@@ -2201,7 +2201,7 @@ async function askCustomerAgent(event) {
 async function runEvaluation(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector('button');
+  const button = form.querySelector('button[type="submit"]');
   const help = form.querySelector('.help');
   button.disabled = true;
   button.textContent = 'Running evaluation…';
@@ -2234,7 +2234,7 @@ async function runEvaluation(event) {
 async function runManualEvaluation(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector('button');
+  const button = form.querySelector('button[type="submit"]');
   const help = form.querySelector('.help');
   button.disabled = true;
   button.textContent = 'Scoring pasted answers…';
