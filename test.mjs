@@ -173,12 +173,36 @@ assert.match(js, /requestSubmit/);
 assert.match(js, /customer-question'\)\?\.focus/);
 assert.match(js, /activeChatId/);
 assert.match(js, /RECENT CHATS/);
+assert.match(js, /<aside class="chat-setup"><h2>Chat setup<\/h2>/);
+// While the agent answers, the bubble shows animated dots; replies keep their line breaks.
+assert.match(js, /<div class="bubble is-thinking" role="status" aria-label="Thinking">/);
+assert.match(css, /\.chat-window \.message \.bubble \{ white-space: pre-wrap;/);
+// Messages scroll inside a fixed-height chat box so the message box stays on screen.
+assert.match(css, /\.chat-window \.messages \{[^}]*overflow-y: auto;/);
+assert.match(js, /if \(chatMessages\) chatMessages\.scrollTop = chatMessages\.scrollHeight;/);
+// Example questions only fill the message box; the person still chooses to send.
+assert.match(js, /input\.value = button\.textContent;\n\s+input\.focus\(\);/);
+// The empty state lives in #chat-messages and is hidden once a message is added.
+assert.match(css, /\.chat-window \.messages:has\(\.message\) \.chat-empty \{ display: none; \}/);
 assert.match(js, /Write a message/);
 assert.match(js, /file-drop"><label for="file-input">Upload document/);
 assert.match(js, /Golden datasets/);
+assert.match(js, /<aside class="datasets-generate"><h2>Generate a draft dataset<\/h2>/);
+assert.match(js, /\$\{approved \? 'Approved' : 'Needs review'\}/);
+assert.doesNotMatch(js, /YOUR BENCHMARKS/);
+// The review screen has one secondary "Back to datasets" and Go to evaluation as its main action.
+assert.equal(js.match(/button\('Back to datasets'/g).length, 1);
+assert.match(js, /button\('Back to datasets', 'secondary', 'js-close-review'\)/);
+// The Golden datasets entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.datasets-card/);
 assert.match(js, /Welcome to Verity/);
 assert.match(js, /Upload a source document/);
-assert.match(js, /Five steps from source document to evidence/);
+assert.match(js, /<span class="home-next-step">Step \$\{step\.number\} of 5<\/span>/);
+assert.match(js, /<ol class="home-track" aria-label="Setup progress">/);
+assert.match(js, /<details class="home-terms"><summary>What do these terms mean\?<\/summary>/);
+// The home entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.home-next/);
+assert.doesNotMatch(css.replace(/@media \(prefers-reduced-motion: no-preference\) \{.*\n/, ''), /animation: home-/);
 assert.match(js, /const pages = \{ home, evaluation/);
 assert.match(html, /data-page="home"/);
 assert.ok(html.indexOf('data-page="datasets"') < html.indexOf('data-page="evaluation"'));
@@ -230,9 +254,19 @@ assert.match(js, /js-remove-technical-document/);
 assert.match(js, /removeTechnicalDocument/);
 assert.match(js, /This permanently removes/);
 assert.match(js, /Technical documents/);
-assert.match(js, /technical-library-scroll/);
+// Technical Blueprint: a document panel lists every technical document; the Decision filler box is gone.
+assert.match(js, /<aside class="blueprint-rail" aria-label="Technical documents"><h2>Technical documents<\/h2>/);
+assert.match(js, /<button class="blueprint-doc-open js-open-technical" data-id=/);
+assert.match(js, /<h2>What this system does<\/h2>/);
+assert.doesNotMatch(js, /The system chooses the appropriate documented path\.<\/p><\/div>\$\{paths/);
+// The Technical Blueprint entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.blueprint-rail/);
 assert.match(js, /allDocuments/);
-assert.match(js, /Website knowledge base/);
+assert.match(js, /<aside class="sources-add"><div><h2>Add a source<\/h2>/);
+assert.match(js, /<form id="website-form" class="sources-website">/);
+assert.doesNotMatch(js, /What happens next<\/h3>/);
+// The Sources entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.sources-item/);
 assert.match(js, /Crawl website/);
 assert.match(js, /How it works/);
 assert.match(js, /Source evidence/);
@@ -251,7 +285,7 @@ assert.match(server, /text-embedding-3-small/);
 assert.match(server, /function embedAll/);
 assert.match(server, /RETRIEVED POLICY SECTIONS/);
 assert.match(server, /store\.chunks/);
-assert.match(js, /RAG ready/);
+assert.match(js, /'Ready for search' : 'Needs indexing'/);
 assert.match(js, /Try customer chat/);
 assert.match(js, /Create golden dataset/);
 assert.match(js, /gpt-5\.6-luna/);
@@ -263,10 +297,17 @@ assert.match(js, /Add scenario/);
 assert.match(js, /Remove scenario/);
 assert.match(js, /Go to evaluation/);
 assert.match(js, /Save & approve/);
-assert.match(js, /Viewing evaluation/);
+assert.match(js, /<div class="results-switch"><label for="evaluation-history-select">Switch run<\/label>/);
+assert.match(js, /<details class="results-section"><summary>Run details and source coverage<\/summary>/);
+// The Results entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.results-head/);
 assert.match(js, /Tested agent’s answer/);
-assert.match(js, /Score pasted agent answers/);
-assert.match(js, /<details class="manual-backup">/);
+assert.match(js, /<div class="manual-backup"><h2>Score pasted answers<\/h2>/);
+assert.match(js, /<aside class="evaluation-run"><h2>Run an evaluation<\/h2>/);
+// The dataset picker sits outside #evaluation-form so the form's first button stays the Run button.
+assert.match(js, /<\/select><\/div><form id="evaluation-form" class="evaluation-form">/);
+// The Evaluation entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.evaluation-manual/);
 assert.match(js, /runManualEvaluation/);
 assert.match(js, /no retrieval trace was captured/);
 assert.match(js, /Download report/);
@@ -282,6 +323,17 @@ assert.match(js, /Rubric/);
 assert.match(js, /FlexAgent target/);
 assert.match(js, /flexagent-form/);
 assert.match(js, /Connect FlexAgent/);
+// Settings: vertical tab rail; Up/Down move between tabs like Left/Right.
+assert.match(js, /role="tablist" aria-label="Settings sections" aria-orientation="vertical"/);
+assert.match(js, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'\]/);
+// The instruction pickers sit outside #agent-prompt-form: saveAgentPrompt takes the form's first button as Save.
+assert.match(js, /<\/select><\/div><\/div><form id="agent-prompt-form" class="form-grid agent-prompt">/);
+// Credential fields keep their types and autocomplete hints.
+assert.match(js, /<input id="openai-key" required type="password" autocomplete="off"/);
+assert.match(js, /<input id="flexagent-login-password" required type="password" autocomplete="current-password" \/>/);
+assert.match(js, /<input id="flexagent-token" type="password" autocomplete="off"/);
+// The Settings entrance animation only runs when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.settings-layout \.settings-tabs/);
 assert.match(js, /flexagent-organization-picker/);
 assert.match(js, /flexagent-agent-picker/);
 assert.match(js, /loadFlexAgentOrganizations/);

@@ -153,8 +153,8 @@ function home() {
       page: 'settings',
       number: '1',
       title: 'Connect your models',
-      who: 'You',
-      text: 'Add your OpenAI key. The control model builds and scores the tests. The target is the agent being tested: an OpenAI model or a FlexAgent agent.',
+      text: 'Add your OpenAI key. The control model writes and grades the tests; the target is the agent you are testing.',
+      action: 'Open Settings',
       status: controls.length
         ? `Control model ready${targets.length ? ` · ${plural(targets.length, 'target')}` : ' · no target yet'}`
         : 'Not connected yet',
@@ -164,8 +164,8 @@ function home() {
       page: 'documents',
       number: '2',
       title: 'Upload a source document',
-      who: 'You',
-      text: 'Add the policy, SOP, website, or technical blueprint that defines the right answers. Verity splits it into searchable sections.',
+      text: 'The policy, SOP, website, or technical blueprint that defines the right answers.',
+      action: 'Upload a source document',
       status: documents.length ? plural(documents.length, 'source') : 'No sources yet',
       done: documents.length > 0,
     },
@@ -173,8 +173,8 @@ function home() {
       page: 'datasets',
       number: '3',
       title: 'Build the golden dataset',
-      who: 'Control model, then you',
-      text: 'The control model drafts realistic questions, each with an expected answer and source evidence. You edit and approve them. This becomes the benchmark.',
+      text: 'The control model drafts questions with expected answers and source evidence. You edit and approve them.',
+      action: 'Open Golden datasets',
       status: workspace.datasets.length ? `${approved} approved · ${plural(drafts, 'draft')}` : 'No datasets yet',
       done: approved > 0,
     },
@@ -182,8 +182,8 @@ function home() {
       page: 'evaluation',
       number: '4',
       title: 'Run the evaluation',
-      who: 'Target agent, then control model',
-      text: 'The target agent answers every scenario. The control model scores each answer against the expected answer and required points.',
+      text: 'The target agent answers every scenario and the control model scores each answer.',
+      action: 'Open Evaluation',
       status: runs ? plural(runs, 'run') : 'No runs yet',
       done: runs > 0,
     },
@@ -191,8 +191,8 @@ function home() {
       page: 'results',
       number: '5',
       title: 'Review the results',
-      who: 'You',
-      text: 'See pass or gap for each scenario, why it was scored that way, and the source sections the agent used. Download a report to share.',
+      text: 'Pass or gap for each scenario, with the reason and the source sections the agent used.',
+      action: 'Open Results',
       status: runs ? 'Results ready' : 'Appears after a run',
       done: runs > 0,
     },
@@ -207,10 +207,14 @@ function home() {
     ],
     ['Source evidence', 'The passage in your document that proves an expected answer is correct.'],
   ];
+  const step = workflow.find(item => item.number === next);
+  const nextPanel = step
+    ? `<section class="home-next"><div><span class="home-next-step">Step ${step.number} of 5</span><h2>${step.title}</h2><p>${step.text}</p></div>${step.page === 'documents' ? button(step.action, 'primary', 'js-upload') : `<a class="button button-primary" href="#${step.page}" data-page="${step.page}">${step.action}</a>`}</section>`
+    : `<section class="home-next"><div><span class="home-next-step">Ready</span><h2>Turn a trusted document into a test your agent has to pass.</h2><p>Every step is set up. Add a source to build a new test, or review your latest results.</p></div>${button('Upload a source document', 'primary', 'js-upload')}</section>`;
   return `${header('Welcome to Verity', 'Test whether an AI agent answers the way your documents say it should.')}
-    <section class="home-intro"><div><span class="eyebrow">WHAT VERITY DOES</span><h2>Turn a trusted document into a test your agent has to pass.</h2><p>Give Verity the source your team relies on. It builds a set of realistic questions with correct answers taken from that source, has your agent answer them, and shows exactly where the agent was right, incomplete, or wrong, with the evidence for each.</p></div><div class="home-intro-action">${button('Upload a source document', 'primary', 'js-upload')}${controls.length ? '' : '<p class="help">Connect models first (step 1) so uploaded documents can be indexed for search.</p>'}</div></section>
-    <section class="home-flow" aria-labelledby="home-flow-title"><div class="home-section-head"><span class="eyebrow">HOW IT WORKS</span><h2 id="home-flow-title">Five steps from source document to evidence.</h2></div><ol>${workflow.map(step => `<li class="${step.number === next ? 'is-next' : ''}"><a href="#${step.page}" data-page="${step.page}"><span class="home-step-top"><span class="home-step-number">${step.number}</span>${step.number === next ? '<span class="home-step-badge">Start here</span>' : ''}</span><strong>${step.title}</strong><span class="home-step-who">${step.who}</span><small>${step.text}</small><span class="home-step-status ${step.done ? 'done' : ''}">${step.status}</span></a></li>`).join('')}</ol></section>
-    <section class="home-concepts" aria-labelledby="home-concepts-title"><div class="home-section-head"><span class="eyebrow">KEY TERMS</span><h2 id="home-concepts-title">Four words you will see throughout.</h2></div><dl>${concepts.map(([term, meaning]) => `<div><dt>${term}</dt><dd>${meaning}</dd></div>`).join('')}</dl><p class="help">Can’t run your agent from Verity? Ask it each scenario yourself, then paste the replies on the Evaluation page to score them.</p></section>`;
+    ${nextPanel}
+    <ol class="home-track" aria-label="Setup progress">${workflow.map((step, index) => `<li style="--i: ${index}" class="${step.done ? 'done' : ''} ${step.number === next ? 'is-next' : ''}"><a href="#${step.page}" data-page="${step.page}"><strong>${step.number}. ${step.title}</strong><small>${step.done ? '✓ ' : ''}${step.status}</small></a></li>`).join('')}</ol>
+    <details class="home-terms"><summary>What do these terms mean?</summary><dl>${concepts.map(([term, meaning]) => `<div><dt>${term}</dt><dd>${meaning}</dd></div>`).join('')}</dl><p class="help">Can’t run your agent from Verity? Ask it each scenario yourself, then paste the replies on the Evaluation page to score them.</p></details>`;
 }
 
 function evaluation() {
@@ -245,39 +249,38 @@ function evaluation() {
               ? 'Connect a control model in Settings.'
               : 'Select this FlexAgent again to create its LiveKit target.'
       : 'Upload a source, connect target and control models in Settings, then approve a golden dataset.';
+  // The dataset picker sits outside #evaluation-form: runEvaluation takes the form's first button as Run.
   const runner = ready
-    ? `<section class="panel card-pad"><h2 class="minor-title">Run an approved evaluation</h2><form id="evaluation-form" class="form-grid"><div class="field"><label for="evaluation-dataset">Golden dataset</label><select id="evaluation-dataset">${approved.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(datasetLabel(item))}</option>`).join('')}</select></div>${connectionField('Target agent', targets, 'evaluation-target', 'AI')}${connectionField('Control model', controls, 'evaluation-control', 'QA')}<div class="field full"><button class="button button-primary" type="submit">Run evaluation</button><span class="help">The target agent answers each approved scenario, then the control model judges it against the saved rubric.</span></div></form></section>`
-    : `<section class="panel card-pad"><h2 class="minor-title">Next step</h2><p class="page-subtitle">${nextStep}</p></section>`;
+    ? `<div class="field"><label for="evaluation-dataset">Golden dataset</label><select id="evaluation-dataset"><button type="button"><selectedcontent></selectedcontent></button>${approved.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(datasetLabel(item))}</option>`).join('')}</select></div><form id="evaluation-form" class="evaluation-form">${connectionField('Agent being tested', targets, 'evaluation-target', 'AI')}${connectionField('Graded by', controls, 'evaluation-control', 'QA')}<button class="button button-primary" type="submit">Run evaluation</button><p class="help">Your agent answers every scenario, then the control model grades each answer.</p></form>`
+    : `<div class="evaluation-blocked"><strong>Not ready to run yet</strong><p>${nextStep}</p></div>`;
   const manualRunner =
     canWriteWorkspace() && approved.length && controls.length
-      ? `<details class="manual-backup"><summary><span><strong>Backup: Score pasted agent answers</strong><small>If the agent can’t be run from here, ask it each scenario elsewhere, paste its replies, and score them with the control model.</small></span><span class="manual-open">Show <i>→</i></span></summary><div class="manual-backup-list">${approved.map(dataset => `<details class="manual-evaluation"><summary><span><strong>${escapeHtml(datasetLabel(dataset))}</strong><small>Ready for ${dataset.cases.length} pasted replies</small></span><span class="manual-open">Open test <i>→</i></span></summary><form class="manual-evaluation-form form-grid" data-dataset-id="${escapeHtml(dataset.id)}"><div class="field full"><label>Control model<select name="controlConnectionId">${controls.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></label></div>${dataset.cases.map((item, index) => `<div class="field full"><label for="manual-answer-${dataset.id}-${index}">Scenario ${index + 1}</label><p class="help">${escapeHtml(item.question)}</p><textarea id="manual-answer-${dataset.id}-${index}" name="answer" required placeholder="Paste the FlexAgent reply"></textarea></div>`).join('')}<div class="field full"><button class="button button-primary" type="submit">Score pasted answers</button><span class="help">One reply is required for each scenario.</span></div></form></details>`).join('')}</div></details>`
+      ? `<div class="manual-backup"><h2>Score pasted answers</h2><p>Can’t run your agent from Verity? Ask it each scenario yourself, paste the replies, and the control model scores them.</p><div class="manual-backup-list">${approved.map((dataset, index) => `<details class="manual-evaluation" style="--i: ${index}"><summary><span><strong>${escapeHtml(documents.find(document => document.id === dataset.documentId)?.name || 'Unknown source')}</strong><small>${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} to answer</small></span><span class="manual-open">Paste answers</span></summary><form class="manual-evaluation-form" data-dataset-id="${escapeHtml(dataset.id)}"><div class="field"><label for="manual-control-${escapeHtml(dataset.id)}">Graded by</label><select id="manual-control-${escapeHtml(dataset.id)}" name="controlConnectionId">${controls.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></div>${dataset.cases.map((item, index) => `<div class="manual-question"><span class="manual-question-number">${index + 1}</span><div><label class="manual-question-text" for="manual-answer-${dataset.id}-${index}">${escapeHtml(item.question)}</label><textarea id="manual-answer-${dataset.id}-${index}" name="answer" required placeholder="Paste the agent’s reply"></textarea></div></div>`).join('')}<div class="manual-evaluation-foot"><span class="help">One reply is required for each scenario.</span><button class="button button-primary" type="submit">Score pasted answers</button></div></form></details>`).join('')}</div></div>`
       : '';
-  return `${header('Evaluation', 'Run an approved benchmark against a connected target or score replies collected from FlexAgent.')}${workspaceMode === 'flex' ? '<p class="help">The client uploads the matching source to this agent in FlexAgent separately.</p>' : ''}${runner}${manualRunner}`;
+  return `${header('Evaluation', 'Run an approved golden dataset against your agent, or score answers you collected yourself.')}${workspaceMode === 'flex' ? '<p class="help">The client uploads the matching source to this agent in FlexAgent separately.</p>' : ''}<div class="evaluation-layout ${manualRunner ? '' : 'is-single'}">${manualRunner ? `<section class="evaluation-manual">${manualRunner}</section>` : ''}<aside class="evaluation-run"><h2>Run an evaluation</h2>${runner}</aside></div>`;
 }
 
 function documents() {
   const visibleDocuments = workspace.documents.filter(inSelectedWorkspace);
   const readyDocument = visibleDocuments.find(document => document.retrieval?.status === 'ready');
-  const actions = `${canWriteWorkspace() ? button('Upload document', 'primary', 'js-upload') : ''}${workspaceMode === 'local' && readyDocument ? ` ${button('Try customer chat', 'secondary js-start-chat')}` : ''}${visibleDocuments.length ? ` ${button('Create golden dataset', 'secondary js-start-dataset')}` : ''}`;
-  const content = visibleDocuments.length
-    ? `<div class="document-list">${visibleDocuments
-        .map(document => {
-          const ready = document.retrieval?.status === 'ready';
-          return `<div class="document-item"><span class="document-icon">${escapeHtml(document.type)}</span><span><strong>${escapeHtml(document.name)}</strong><small>${document.characters.toLocaleString()} characters extracted · ${ready ? 'Retrieval ready.' : 'Retrieval unavailable — re-upload after connecting OpenAI.'}</small></span><span class="document-actions">${status(ready ? 'RAG ready' : 'Needs indexing', ready ? 'good' : 'draft')}<button class="button button-secondary button-small js-source-dataset" data-id="${escapeHtml(document.id)}" type="button">Generate dataset</button><button class="button button-secondary button-small js-remove-document" data-id="${escapeHtml(document.id)}" type="button">Remove</button></span></div>`;
-        })
-        .join('')}</div>`
-    : '';
-  const sites = (workspace.websites || [])
-    .filter(inSelectedWorkspace)
-    .map(site => {
-      const snapshots = (workspace.websiteSnapshots || []).filter(snapshot => snapshot.websiteId === site.id);
-      const latest = snapshots.at(-1);
-      return `<div class="document-item"><span class="document-icon">WEB</span><span><strong>${escapeHtml(site.rootUrl)}</strong><small>${latest ? `${latest.pages.length} pages · ${escapeHtml(latest.status)}${latest.limit ? ` · ${escapeHtml(latest.limit)}` : ''}` : 'No completed crawl yet.'}</small></span><span class="document-actions">${latest ? status(latest.status === 'complete' ? 'Ready' : 'Incomplete', latest.status === 'complete' ? 'good' : 'draft') : ''}${latest ? `<button class="button button-secondary button-small js-source-dataset" data-id="${escapeHtml(latest.id)}" type="button">Generate dataset</button>` : ''}<button class="button button-secondary button-small js-recrawl-website" data-id="${escapeHtml(site.id)}" type="button">Re-crawl</button><button class="button button-secondary button-small js-remove-website" data-id="${escapeHtml(site.id)}" type="button">Remove</button></span></div>`;
-    })
-    .join('');
+  const actions = `${visibleDocuments.length ? button('Create golden dataset', 'primary', 'js-start-dataset') : ''}${workspaceMode === 'local' && readyDocument ? ` ${button('Try customer chat', 'secondary js-start-chat')}` : ''}`;
+  const sourceState = (text, ready) => `<span class="sources-state ${ready ? '' : 'warn'}">${text}</span>`;
+  const datasetButton = id =>
+    `<button class="button button-secondary button-small js-source-dataset" data-id="${escapeHtml(id)}" type="button">Generate dataset</button>`;
+  const files = visibleDocuments.map((document, index) => {
+    const ready = document.retrieval?.status === 'ready';
+    return `<article class="sources-item" style="--i: ${index}"><span class="sources-badge">${escapeHtml(document.type)}</span><div><strong>${escapeHtml(document.name)}</strong><small>${document.characters.toLocaleString()} characters extracted${ready ? '' : ' · Re-upload after connecting OpenAI to make it searchable.'}</small><div class="sources-item-actions">${datasetButton(document.id)}<button class="sources-quiet danger js-remove-document" data-id="${escapeHtml(document.id)}" type="button">Remove</button></div></div>${sourceState(ready ? 'Ready for search' : 'Needs indexing', ready)}</article>`;
+  });
+  const sites = (workspace.websites || []).filter(inSelectedWorkspace).map((site, index) => {
+    const snapshots = (workspace.websiteSnapshots || []).filter(snapshot => snapshot.websiteId === site.id);
+    const latest = snapshots.at(-1);
+    const complete = latest?.status === 'complete';
+    return `<article class="sources-item" style="--i: ${files.length + index}"><span class="sources-badge web">WEB</span><div><strong>${escapeHtml(site.rootUrl)}</strong><small>${latest ? `${latest.pages.length} ${latest.pages.length === 1 ? 'page' : 'pages'} collected${latest.limit ? ` · ${escapeHtml(latest.limit)}` : ''}` : 'No completed crawl yet.'}</small><div class="sources-item-actions">${latest ? datasetButton(latest.id) : ''}<button class="sources-quiet js-recrawl-website" data-id="${escapeHtml(site.id)}" type="button">Re-crawl</button><button class="sources-quiet danger js-remove-website" data-id="${escapeHtml(site.id)}" type="button">Remove</button></div></div>${latest ? sourceState(complete ? 'Ready for search' : 'Incomplete', complete) : ''}</article>`;
+  });
+  const items = [...files, ...sites];
   return `${header('Sources', 'Upload a document or collect a public website as evidence for chat and evaluation.', `<div class="button-row">${actions}</div>`)}
-    <div class="two-col"><section class="panel card-pad"><div class="file-drop"><label for="file-input">Upload document</label><input id="file-input" type="file" accept=".pdf,.docx,.txt" /></div>${content}<section class="website-source"><h2 class="minor-title">Website knowledge base</h2><form id="website-form" class="form-grid"><div class="field full"><label for="website-url">Public website URL</label><input id="website-url" required type="url" placeholder="https://example.com/help" /><span class="help">Verity collects the URL path and its public links into a saved snapshot.</span></div><div class="field full"><button class="button button-secondary" type="submit">Crawl website</button><span id="website-status" class="help" aria-live="polite"></span></div></form>${sites ? `<div class="document-list">${sites}</div>` : ''}</section></section>
-    <aside class="callout"><h3>What happens next</h3><p>Your source becomes the evidence for the golden dataset, customer chat, and every evaluation result.</p></aside></div>`;
+    <div class="sources-layout"><section class="sources-list" aria-label="Your sources">${items.length ? items.join('') : '<article class="sources-empty"><strong>No sources yet</strong>Add a policy, SOP, or website. It becomes the evidence your agent is tested against.</article>'}</section>
+    <aside class="sources-add"><div><h2>Add a source</h2><p>Your source becomes the evidence for datasets, chat, and every result.</p></div><div class="file-drop"><label for="file-input">Upload document</label><input id="file-input" type="file" accept=".pdf,.docx,.txt" /><p><strong>Choose a file</strong> to upload. PDF, DOCX, or TXT.</p></div><hr /><form id="website-form" class="sources-website"><div class="field"><label for="website-url">Public website URL</label><input id="website-url" required type="url" placeholder="https://example.com/help" /></div><button class="button button-secondary" type="submit">Crawl website</button><span id="website-status" class="help" aria-live="polite"></span><span class="help">Verity collects the page and its public links into a saved snapshot.</span></form></aside></div>`;
 }
 
 function technical() {
@@ -390,14 +393,14 @@ function technicalAnalysis(analysis) {
     `<button class="js-technical-tab ${technicalTab === id ? 'active' : ''}" data-tab="${id}" type="button">${label}</button>`;
   const stat = (label, count, note, tab) =>
     `<button class="blueprint-stat js-technical-tab" data-tab="${tab}" type="button"><b>${label}</b><strong>${count}</strong><small>${note}</small></button>`;
-  const overview = `<section class="blueprint-guided overview"><span class="eyebrow">START HERE</span><h2>${escapeHtml(analysis.overview.purpose)}</h2><p>This document describes ${analysis.overview.systems.length} systems, ${catalog.length} APIs or functions, and ${analysis.overview.keyRules.length} important rules.</p>${evidence(analysis.overview.sourceEvidence)}<div class="blueprint-stats">${stat('Systems', analysis.overview.systems.length, 'Components and sources', 'flow')}${catalog.length ? stat('APIs', catalog.length, 'Tools and services', 'apis') : ''}${stat('Rules', analysis.overview.keyRules.length, 'Documented decisions', 'flow')}${analysis.overview.unknowns?.length ? stat('Open questions', analysis.overview.unknowns.length, 'Need confirmation', 'questions') : ''}</div><button class="button button-primary js-technical-tab" data-tab="flow" type="button">See how it works</button></section>`;
-  const flow = `<section class="blueprint-guided"><header><h2>How it works</h2><p>Follow one path from the trigger to the result.</p></header><div class="flow-entry"><b>Request or trigger</b><p>${escapeHtml(analysis.flows[0]?.trigger || 'A documented system event occurs.')}</p></div><div class="flow-arrow">down</div><div class="flow-entry decision"><b>Decision</b><p>The system chooses the appropriate documented path.</p></div>${paths.length > 1 ? `<div class="flow-branches">${paths.map(([label, item]) => `<article class="flow-path"><b>${escapeHtml(label)}</b><p>${escapeHtml(item.action)}</p><small>${escapeHtml(item.result)}</small>${evidence(item.sourceEvidence)}</article>`).join('')}</div>` : `<div class="flow-path">${paths.map(([, item]) => `<b>${escapeHtml(item.action)}</b><p>${escapeHtml(item.result)}</p>${evidence(item.sourceEvidence)}`).join('')}</div>`}<div class="flow-arrow">down</div><div class="flow-entry result"><b>Result</b><p>${escapeHtml(analysis.flows.at(-1)?.result || 'The documented outcome is returned.')}</p></div><div class="flow-details"><h3>Explore each documented flow</h3>${analysis.flows.map((item, index) => `<details><summary><b>${index + 1}. ${escapeHtml(item.trigger)}</b></summary><p><b>Action:</b> ${escapeHtml(item.action)}</p><p>${escapeHtml(item.result)}</p>${item.branch ? `<small>Condition: ${escapeHtml(item.branch)}</small>` : ''}${evidence(item.sourceEvidence)}</details>`).join('')}</div></section>`;
-  const apis = `<section class="blueprint-guided blueprint-api-panel"><header><div><h2>APIs & functions</h2><p>Open a function only when you need its details.</p></div><label>Search <input class="js-catalog-search" placeholder="Find a function" aria-label="Search functions" /></label></header>${Object.entries(
+  const overview = `<section class="blueprint-guided overview"><h2>What this system does</h2><p class="blueprint-purpose">${escapeHtml(analysis.overview.purpose)}</p>${evidence(analysis.overview.sourceEvidence)}<h3 class="blueprint-section-title">At a glance</h3><div class="blueprint-stats">${stat('Systems', analysis.overview.systems.length, 'Components and sources', 'flow')}${catalog.length ? stat('APIs', catalog.length, 'Tools and services', 'apis') : ''}${stat('Rules', analysis.overview.keyRules.length, 'Documented decisions', 'flow')}${analysis.overview.unknowns?.length ? stat('Open questions', analysis.overview.unknowns.length, 'Need confirmation', 'questions') : ''}</div>${analysis.overview.systems.length ? `<h3 class="blueprint-section-title">Systems described</h3><div class="blueprint-systems">${analysis.overview.systems.map(system => `<span>${escapeHtml(system)}</span>`).join('')}</div>` : ''}</section>`;
+  const flow = `<section class="blueprint-guided"><header><h2>How it works</h2><p>Follow one path from the trigger to the result.</p></header><div class="flow-entry"><b>Request or trigger</b><p>${escapeHtml(analysis.flows[0]?.trigger || 'A documented system event occurs.')}</p></div>${paths.length > 1 ? `<div class="flow-arrow" aria-hidden="true">↓</div><div class="flow-branches">${paths.map(([label, item], index) => `<article class="flow-path ${label === 'Escalation' ? 'is-escalation' : label === 'Data source' ? 'is-data' : 'is-knowledge'}" style="--i: ${index}"><b>${escapeHtml(label)}</b><p>${escapeHtml(item.action)}</p><small>${escapeHtml(item.result)}</small>${evidence(item.sourceEvidence)}</article>`).join('')}</div>` : `<div class="flow-arrow" aria-hidden="true">↓</div><div class="flow-path">${paths.map(([, item]) => `<b>${escapeHtml(item.action)}</b><p>${escapeHtml(item.result)}</p>${evidence(item.sourceEvidence)}`).join('')}</div>`}<div class="flow-arrow" aria-hidden="true">↓</div><div class="flow-entry result"><b>Result</b><p>${escapeHtml(analysis.flows.at(-1)?.result || 'The documented outcome is returned.')}</p></div><div class="flow-details"><h3>Explore each documented flow</h3>${analysis.flows.map((item, index) => `<details><summary><b>${index + 1}. ${escapeHtml(item.trigger)}</b></summary><p><b>Action:</b> ${escapeHtml(item.action)}</p><p>${escapeHtml(item.result)}</p>${item.branch ? `<small>Condition: ${escapeHtml(item.branch)}</small>` : ''}${evidence(item.sourceEvidence)}</details>`).join('')}</div></section>`;
+  const apis = `<section class="blueprint-guided blueprint-api-panel"><header><h2>APIs & functions</h2><p>Open a function only when you need its details.</p></header><input class="js-catalog-search blueprint-search" placeholder="Find a function" aria-label="Search functions" />${Object.entries(
     groups,
   )
     .map(
-      ([group, entries]) =>
-        `<section class="catalog-group"><h3>${escapeHtml(group)}</h3>${entries.map(item => `<details data-search="${escapeHtml(`${item.name} ${item.purpose} ${item.whenToCall} ${item.dependencies}`)}"><summary><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.whenToCall)}</small></summary><dl><div><dt>Purpose</dt><dd>${escapeHtml(item.purpose)}</dd></div><div><dt>Inputs</dt><dd>${escapeHtml(item.inputs || 'Not specified')}</dd></div><div><dt>Outputs</dt><dd>${escapeHtml(item.outputs || 'Not specified')}</dd></div></dl>${evidence(item.sourceEvidence)}</details>`).join('')}</section>`,
+      ([group, entries], index) =>
+        `<section class="catalog-group" style="--i: ${index}"><h3>${escapeHtml(group)}</h3>${entries.map(item => `<details data-search="${escapeHtml(`${item.name} ${item.purpose} ${item.whenToCall} ${item.dependencies}`)}"><summary><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.whenToCall)}</small></summary><dl><div><dt>Purpose</dt><dd>${escapeHtml(item.purpose)}</dd></div><div><dt>Inputs</dt><dd>${escapeHtml(item.inputs || 'Not specified')}</dd></div><div><dt>Outputs</dt><dd>${escapeHtml(item.outputs || 'Not specified')}</dd></div></dl>${evidence(item.sourceEvidence)}</details>`).join('')}</section>`,
     )
     .join('')}</section>`;
   const examples = `<section class="blueprint-guided blueprint-example-panel"><h2>Examples</h2><p>Inputs and outcomes found in this document.</p>${analysis.examples.map(item => `<article><div><b>Input</b><p>${escapeHtml(item.input)}</p></div><div><b>Result</b><p>${escapeHtml(item.output)}</p></div>${evidence(item.sourceEvidence)}</article>`).join('')}</section>`;
@@ -438,18 +441,15 @@ function technical() {
   const rows = documents
     .map(
       item =>
-        `<div class="document-item ${item.id === selected?.id ? 'is-current' : ''}"><span class="document-icon">${escapeHtml(item.type)}</span><span><strong>${escapeHtml(item.name)}</strong><small>${item.characters.toLocaleString()} characters · ${item.retrieval?.status === 'ready' ? 'Retrieval ready' : 'Needs indexing'}</small></span><span class="document-actions"><button class="button button-secondary button-small js-open-technical" data-id="${escapeHtml(item.id)}" type="button">Open</button><button class="button button-secondary button-small js-remove-technical-document" data-id="${escapeHtml(item.id)}" type="button">Remove</button></span></div>`,
+        `<div class="blueprint-doc ${item.id === selected?.id ? 'is-current' : ''}"><button class="blueprint-doc-open js-open-technical" data-id="${escapeHtml(item.id)}" type="button" ${item.id === selected?.id ? 'aria-current="true"' : ''}><strong>${escapeHtml(item.name)}</strong><small>${item.characters.toLocaleString()} characters · ${item.retrieval?.status === 'ready' ? 'Ready for search' : 'Needs indexing'}</small></button><button class="blueprint-quiet js-remove-technical-document" data-id="${escapeHtml(item.id)}" type="button">Remove</button></div>`,
     )
     .join('');
-  const list = rows
-    ? `<details class="technical-library"><summary class="button button-secondary">Technical documents <span class="technical-library-count">${documents.length}</span></summary><section class="technical-library-menu" aria-label="Technical documents"><div class="technical-library-scroll">${rows}</div></section></details>`
-    : '';
+  const list =
+    rows || '<p class="blueprint-rail-empty">No technical documents yet. Upload one to see how its system works.</p>';
   const status = technicalUploadStatus
     ? `<p class="technical-upload-status ${technicalUploadStatus.kind}" role="status">${escapeHtml(technicalUploadStatus.message)}</p>`
-    : selected
-      ? `<p class="technical-upload-status ready" role="status">Viewing: ${escapeHtml(selected.name)}</p>`
-      : '';
-  return `<div class="blueprint-simple-top"><div><div class="blueprint-title-row"><h1>Technical Blueprint</h1><span class="analysis-badge">Source-grounded</span></div><p>A plain-language guide to how this system works.</p>${status}</div><div class="button-row blueprint-toolbar">${list}${selected ? `<button class="button button-secondary js-source-dataset" data-id="${escapeHtml(selected.id)}" type="button">Generate dataset</button>` : ''}<label class="button button-primary" for="technical-file-input">Upload document</label></div><input id="technical-file-input" type="file" accept=".pdf,.docx,.txt" /></div>${detail}`;
+    : '';
+  return `${header('Technical Blueprint', 'A plain-language guide to how a system works, taken from its technical document.')}<div class="blueprint-page"><div class="blueprint-main">${detail}</div><aside class="blueprint-rail" aria-label="Technical documents"><h2>Technical documents</h2><div class="blueprint-docs">${list}</div><label class="button button-primary" for="technical-file-input">Upload document</label><input id="technical-file-input" type="file" accept=".pdf,.docx,.txt" />${selected ? `<button class="button button-secondary js-source-dataset" data-id="${escapeHtml(selected.id)}" type="button">Generate dataset</button>` : ''}${status}</aside></div>`;
 }
 
 function datasets() {
@@ -558,8 +558,8 @@ function datasetReview(dataset) {
   const pager = `<div class="review-pager"><span id="review-position">Scenario ${active + 1} of ${dataset.cases.length}</span><div class="button-row"><button class="button button-secondary button-small js-review-step" data-step="-1" type="button" ${active === 0 ? 'disabled' : ''}>‹ Previous</button><button class="button button-secondary button-small js-review-step" data-step="1" type="button" ${active === dataset.cases.length - 1 ? 'disabled' : ''}>Next ›</button></div></div>`;
   const actions = editable
     ? `<div class="button-row"><button class="button button-secondary" type="submit">Save changes</button><button class="button button-primary js-approve" data-id="${escapeHtml(dataset.id)}" type="button">Save & approve</button></div><p id="review-status" class="help" aria-live="polite">Write or verify the expected answer and evidence for every scenario before approving.</p>`
-    : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Back to datasets', 'primary', 'js-close-review')}${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
-  return `${header('Review golden dataset', `${dataset.cases.length} scenarios generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'primary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${declineCheckNote(dataset)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
+    : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
+  return `${header('Review golden dataset', `${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'secondary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${declineCheckNote(dataset)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
 }
 
 function chat() {
@@ -783,11 +783,10 @@ function incompleteAnswerNote(result) {
 function results() {
   const visibleRuns = workspace.evaluations.filter(inSelectedWorkspace);
   const latest = visibleRuns.find(item => item.id === viewingEvaluationId);
-  const download = latest ? button('Download report', 'secondary', 'js-download-evaluation') : '';
   const label = evaluation =>
     `${evaluationSourceName(evaluation)} · ${evaluationRunType(evaluation)} · ${evaluation.results.length} scenarios`;
   const picker = visibleRuns.length
-    ? `<section class="panel evaluation-switcher"><label for="evaluation-history-select">${latest ? 'Viewing evaluation' : 'Open a saved evaluation'}</label><select id="evaluation-history-select"><option value="">Choose an evaluation</option>${visibleRuns.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === latest?.id ? 'selected' : ''}>${escapeHtml(label(item))} · ${escapeHtml(item.score)}% · ${new Date(item.createdAt).toLocaleString()}</option>`).join('')}</select></section>`
+    ? `<div class="results-switch"><label for="evaluation-history-select">Switch run</label><select id="evaluation-history-select"><button type="button"><selectedcontent></selectedcontent></button><option value="">Choose an evaluation</option>${visibleRuns.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === latest?.id ? 'selected' : ''}>${escapeHtml(label(item))} · ${escapeHtml(item.score)}% · ${new Date(item.createdAt).toLocaleString()}</option>`).join('')}</select></div>`
     : '';
   const points = (items, empty) =>
     (items || []).length
@@ -821,16 +820,15 @@ function results() {
     const list = evaluation.results
       .map(
         (result, index) =>
-          `<button class="result-list-item js-result-pick ${result.pass ? 'is-pass' : 'is-gap'}" data-index="${index}" data-outcome="${result.pass ? 'pass' : 'gap'}" type="button" ${index === resultScenarioIndex ? 'aria-current="true"' : ''} ${shown(result) ? '' : 'hidden'}><span class="result-list-badge">${result.pass ? 'PASS' : 'GAP'}</span><span class="result-list-text"><span>${index + 1}. ${escapeHtml(result.case.question)}</span>${isDecline(result.case) ? '<span class="review-list-flag decline-flag">Should decline</span>' : ''}${result.answerMayBeIncomplete ? '<span class="review-list-flag">Answer may be incomplete</span>' : ''}</span><span class="result-list-score">${escapeHtml(result.score)}%</span></button>`,
+          `<button class="result-list-item js-result-pick ${result.pass ? 'is-pass' : 'is-gap'}" style="--i: ${index}" data-index="${index}" data-outcome="${result.pass ? 'pass' : 'gap'}" type="button" ${index === resultScenarioIndex ? 'aria-current="true"' : ''} ${shown(result) ? '' : 'hidden'}><span class="result-list-badge">${result.pass ? 'PASS' : 'GAP'}</span><span class="result-list-text"><span>${index + 1}. ${escapeHtml(result.case.question)}</span>${isDecline(result.case) ? '<span class="review-list-flag decline-flag">Should decline</span>' : ''}${result.answerMayBeIncomplete ? '<span class="review-list-flag">Answer may be incomplete</span>' : ''}</span><span class="result-list-score">${escapeHtml(result.score)}%</span></button>`,
       )
       .join('');
     return `<div class="result-layout"><nav class="panel result-list" aria-label="Scenario results"><div class="result-list-head"><strong>Scenario results</strong><div class="result-filters" role="group" aria-label="Filter scenarios">${filters.map(([key, name, count]) => `<button class="result-filter js-result-filter" data-filter="${key}" type="button" aria-pressed="${key === resultFilter}">${escapeHtml(name)} <span>${count}</span></button>`).join('')}</div></div><div class="result-list-scroll">${list}</div></nav><section class="panel card-pad result-panel"><div class="review-pager"><span id="result-position">Scenario ${resultScenarioIndex + 1} of ${evaluation.results.length}</span><div class="button-row"><button class="button button-secondary button-small js-result-step" data-step="-1" type="button">‹ Previous</button><button class="button button-secondary button-small js-result-step" data-step="1" type="button">Next ›</button></div></div>${evaluation.results.map((result, index) => detail(result, index)).join('')}</section></div>`;
   };
-  return `${header('Results', 'Completed evaluations will appear here, with the tested agent’s answer, the expected answer, the score, and the supporting source evidence.', download)}
-    ${latest ? `${picker}<section class="panel card-pad"><h2 class="minor-title">Evaluation: ${escapeHtml(latest.score)}%</h2><p class="page-subtitle">${escapeHtml(label(latest))} · ${new Date(latest.createdAt).toLocaleString()}</p>${subScoresLabel(latest) ? `<p class="sub-scores">${escapeHtml(subScoresLabel(latest))}</p>` : ''}<p class="judge-settings">${escapeHtml(judgeSettingsLabel(latest.judge))}</p>${verityLabel(latest.verity) ? `<p class="judge-settings">${escapeHtml(verityLabel(latest.verity))}</p>` : ''}${judgeComparisonNote(latest, visibleRuns)}${coverageMarkup(workspace.datasets.find(item => item.id === latest.datasetId)?.coverage)}</section>${evaluationSummaryMarkup(latest)}${scenarioResults(latest)}${retrievalPanel}` : `<section class="panel card-pad"><h2 class="minor-title">No results yet</h2><p class="page-subtitle">Once you run an approved golden dataset against your target agent, this area will make every pass, gap, and unsupported claim easy to review.</p></section>`}`;
+  const summary = latest ? evaluationSummaryMarkup(latest) : '';
+  return `${header('Results', 'Each run keeps the agent’s answer, the expected answer, the score, and the source evidence for every scenario.')}
+    ${latest ? `<section class="results-head"><div class="results-score">${escapeHtml(latest.score)}%<small>Overall score</small></div><div class="results-run"><h2>${escapeHtml(evaluationSourceName(latest))}</h2><p>${escapeHtml(`${evaluationRunType(latest)} · ${latest.results.length} ${latest.results.length === 1 ? 'scenario' : 'scenarios'} · ${new Date(latest.createdAt).toLocaleString()}`)}</p>${subScoresLabel(latest) ? `<p class="sub-scores">${escapeHtml(subScoresLabel(latest))}</p>` : ''}<div class="results-counts"><span class="results-chip pass">${latest.results.length - gapCount} passed</span><span class="results-chip gap">${gapCount} ${gapCount === 1 ? 'gap' : 'gaps'}</span></div></div><div class="results-actions">${picker}${button('Download report', 'secondary', 'js-download-evaluation')}</div></section>${summary ? `<details class="results-section"><summary>Summary and where to investigate</summary><div>${summary}</div></details>` : ''}<details class="results-section"><summary>Run details and source coverage</summary><div><p class="judge-settings">${escapeHtml(judgeSettingsLabel(latest.judge))}</p>${verityLabel(latest.verity) ? `<p class="judge-settings">${escapeHtml(verityLabel(latest.verity))}</p>` : ''}${judgeComparisonNote(latest, visibleRuns)}${coverageMarkup(workspace.datasets.find(item => item.id === latest.datasetId)?.coverage)}</div></details><h2 class="results-title">Scenario results</h2>${scenarioResults(latest)}${retrievalPanel}` : `<section class="panel card-pad"><h2 class="minor-title">No results yet</h2><p class="page-subtitle">Once you run an approved golden dataset against your target agent, this area will make every pass, gap, and unsupported claim easy to review.</p></section>`}`;
 }
-
-// Switches panels in place so unsaved input in other panels is kept.
 function showSettingsTab(key) {
   settingsTab = key;
   document.querySelectorAll('.js-settings-tab').forEach(tab => {
@@ -853,12 +851,12 @@ function settings() {
     target &&
     workspace.agentConfigs.find(item => item.documentId === document.id && item.connectionId === target.id);
   const connections = workspace.connections.length
-    ? `<div class="document-list">${workspace.connections
+    ? `<div class="settings-models">${workspace.connections
         .map(
-          connection =>
-            `<div class="document-item"><span class="document-icon">${connection.role === 'target' ? 'AI' : 'QA'}</span><span><strong>${escapeHtml(connection.name)}</strong><small>${connection.role === 'target' ? 'Target agent' : 'Control model'} · ${escapeHtml(connection.model)}${connection.role === 'control' ? ` · ${escapeHtml(judgeSupportLabel(connection))}` : ''}</small></span><span class="document-actions">${
+          (connection, index) =>
+            `<div class="settings-model" style="--i: ${index}"><div><span class="settings-role ${connection.role === 'target' ? '' : 'grader'}">${connection.role === 'target' ? 'Agent being tested' : 'Grader'}</span><strong>${escapeHtml(connection.name)}</strong><small>${escapeHtml(connection.model)}</small>${connection.role === 'control' ? `<small>${escapeHtml(judgeSupportLabel(connection))}</small>` : ''}</div><div class="settings-model-actions">${
               connection.judgeSupport?.reasoningEffort
-                ? `<label class="reasoning-field" title="Higher reasoning grades more carefully but is slower and costs more."><span>Reasoning</span><select class="js-reasoning" data-id="${escapeHtml(connection.id)}">${Object.entries(
+                ? `<label class="reasoning-field" title="Higher reasoning grades more carefully but is slower and costs more."><span>Reasoning</span><select class="js-reasoning" data-id="${escapeHtml(connection.id)}"><button type="button"><selectedcontent></selectedcontent></button>${Object.entries(
                     REASONING_LABELS,
                   )
                     .map(
@@ -867,35 +865,36 @@ function settings() {
                     )
                     .join('')}</select></label>`
                 : ''
-            }${connection.role === 'control' ? `<button class="button button-secondary button-small js-check-judge" data-id="${escapeHtml(connection.id)}" type="button">Check model</button>` : ''}<button class="button button-secondary button-small js-remove-connection" data-id="${escapeHtml(connection.id)}" type="button">Remove</button></span></div>`,
+            }${connection.role === 'control' ? `<button class="button button-secondary button-small js-check-judge" data-id="${escapeHtml(connection.id)}" type="button">Check model</button>` : ''}<button class="settings-quiet js-remove-connection" data-id="${escapeHtml(connection.id)}" type="button">Remove</button></div></div>`,
         )
         .join('')}</div>`
     : '';
   const promptForm =
     target && document
-      ? `<form id="agent-prompt-form" class="form-grid agent-prompt"><div class="field"><label for="instruction-document">Policy document</label><select id="instruction-document">${workspace.documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === document.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="instruction-target">Target agent</label><select id="instruction-target">${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === target.id ? 'selected' : ''}>${escapeHtml(item.name)} · ${escapeHtml(item.model)}</option>`).join('')}</select></div><div class="field full"><label for="agent-system-prompt">Instructions for this policy</label><textarea id="agent-system-prompt" required>${escapeHtml(config?.systemPrompt || target.systemPrompt || 'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.')}</textarea><span class="help">Only used when this policy document is selected in customer chat or evaluation.</span></div><div class="field full form-actions"><button class="button button-secondary" type="submit">Save instructions for this policy</button></div></form>`
+      ? `<div class="form-grid agent-prompt-pickers"><div class="field"><label for="instruction-document">Policy document</label><select id="instruction-document"><button type="button"><selectedcontent></selectedcontent></button>${workspace.documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === document.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="instruction-target">Target agent</label><select id="instruction-target"><button type="button"><selectedcontent></selectedcontent></button>${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === target.id ? 'selected' : ''}>${escapeHtml(item.name)} · ${escapeHtml(item.model)}</option>`).join('')}</select></div></div><form id="agent-prompt-form" class="form-grid agent-prompt"><div class="field full"><label for="agent-system-prompt">Instructions for this policy</label><textarea id="agent-system-prompt" required>${escapeHtml(config?.systemPrompt || target.systemPrompt || 'Follow the policy document. Do not invent information. If it does not answer the question, say so clearly.')}</textarea></div><div class="field full form-actions"><button class="button button-secondary" type="submit">Save instructions for this policy</button></div></form>`
       : '';
   const session = workspace.flexAgentSession;
   const selectedAgent = session?.selectedAgentId;
   const flexAgentLogin = session?.connected
-    ? `<h2 class="minor-title">FlexAgent connection</h2><section class="flexagent-connection" aria-label="FlexAgent connection status"><div class="flexagent-connection-status"><span class="status good">Connected</span></div><dl><div><dt>Organization</dt><dd>${escapeHtml(session.orgId)}</dd></div><div><dt>API</dt><dd>${escapeHtml(session.baseUrl)}</dd></div></dl></section><div class="form-grid"><div class="field full"><label for="flexagent-agent-picker">Choose FlexAgent</label><select id="flexagent-agent-picker" ${flexAgentAgents.length ? '' : 'disabled'}><option value="">${flexAgentAgents.length ? 'Choose an agent' : 'Load agents first'}</option>${flexAgentAgents.map(agent => `<option value="${escapeHtml(agent.id)}" ${agent.id === selectedAgent ? 'selected' : ''}>${escapeHtml(agent.name)}</option>`).join('')}</select><span class="help">${session.selectedAgentName ? `Selected: ${escapeHtml(session.selectedAgentName)}` : 'Each selected agent must allowlist this Eval Tool origin in FlexAgent Embed settings.'}</span></div><div class="field full"><div class="button-row"><button id="flexagent-load-agents" class="button button-secondary" type="button">Load agents</button><button id="flexagent-reconnect" class="button button-secondary" type="button">Reconnect FlexAgent</button></div></div></div>`
-    : `<h2 class="minor-title">Connect FlexAgent</h2><form id="flexagent-login-form" class="form-grid"><div class="field"><label for="flexagent-login-url">FlexAgent API URL</label><input id="flexagent-login-url" required type="url" value="https://api-staging.flexagents.ai" /></div><div class="field"><label for="flexagent-login-org-id">Organization ID</label><input id="flexagent-login-org-id" required placeholder="FlexAgent organization ID" /></div><div class="field"><label for="flexagent-login-email">FlexAgent email</label><input id="flexagent-login-email" required type="email" autocomplete="username" /></div><div class="field"><label for="flexagent-login-password">FlexAgent password</label><input id="flexagent-login-password" required type="password" autocomplete="current-password" /></div><div class="field"><label for="flexagent-login-origin">Eval Tool origin</label><input id="flexagent-login-origin" required type="url" value="http://127.0.0.1:4173" /><span class="help">This exact origin must be allowed in the selected agent’s FlexAgent Embed settings.</span></div><div class="field full"><button class="button button-secondary" type="submit">Connect FlexAgent</button><span class="help">Your password is used only to sign in. Eval Tool stores the returned access token encrypted on this computer.</span></div></form>`;
-  const flexAgentForm = `${flexAgentLogin}<details><summary>Manual FlexAgent target</summary><form id="flexagent-form" class="form-grid"><div class="field"><label for="flexagent-name">Name</label><input id="flexagent-name" value="FlexAgent target" /></div><div class="field"><label for="flexagent-url">FlexAgent API URL</label><input id="flexagent-url" required type="url" placeholder="https://flexagent.example.com" /></div><div class="field"><label for="flexagent-mode">Connection method</label><select id="flexagent-mode"><option value="api">Private evaluation API</option><option value="livekit">LiveKit widget path</option></select></div><div class="field"><label for="flexagent-org-id">Organization ID</label><input id="flexagent-org-id" required placeholder="FlexAgent organization ID" /></div><div class="field"><label for="flexagent-agent-id">Agent ID</label><input id="flexagent-agent-id" required placeholder="FlexAgent agent ID" /></div><div class="field"><label for="flexagent-origin">Eval Tool origin</label><input id="flexagent-origin" type="url" value="http://127.0.0.1:4173" /></div><div class="field full"><label for="flexagent-token">Evaluation service token</label><input id="flexagent-token" type="password" autocomplete="off" placeholder="Only required for Private evaluation API" /></div><div class="field full"><button class="button button-secondary" type="submit">Save FlexAgent target</button></div></form></details>`;
+    ? `<h2 class="minor-title">FlexAgent connection</h2><section class="flexagent-connection" aria-label="FlexAgent connection status"><div class="flexagent-connection-status"><span class="status good">Connected</span></div><dl><div><dt>Organization</dt><dd>${escapeHtml(session.orgId)}</dd></div><div><dt>API</dt><dd>${escapeHtml(session.baseUrl)}</dd></div></dl></section><div class="form-grid"><div class="field full"><label for="flexagent-agent-picker">Choose FlexAgent</label><select id="flexagent-agent-picker" ${flexAgentAgents.length ? '' : 'disabled'}><button type="button"><selectedcontent></selectedcontent></button><option value="">${flexAgentAgents.length ? 'Choose an agent' : 'Load agents first'}</option>${flexAgentAgents.map(agent => `<option value="${escapeHtml(agent.id)}" ${agent.id === selectedAgent ? 'selected' : ''}>${escapeHtml(agent.name)}</option>`).join('')}</select><span class="help">${session.selectedAgentName ? `Selected: ${escapeHtml(session.selectedAgentName)}` : 'Each selected agent must allowlist this Eval Tool origin in FlexAgent Embed settings.'}</span></div><div class="field full"><div class="button-row"><button id="flexagent-load-agents" class="button button-secondary" type="button">Load agents</button><button id="flexagent-reconnect" class="button button-secondary" type="button">Reconnect FlexAgent</button></div></div></div>`
+    : `<h2 class="minor-title">Connect FlexAgent</h2><form id="flexagent-login-form" class="form-grid"><div class="field"><label for="flexagent-login-url">FlexAgent API URL</label><input id="flexagent-login-url" required type="url" value="https://api-staging.flexagents.ai" /></div><div class="field"><label for="flexagent-login-org-id">Organization ID</label><input id="flexagent-login-org-id" required placeholder="FlexAgent organization ID" /></div><div class="field"><label for="flexagent-login-email">FlexAgent email</label><input id="flexagent-login-email" required type="email" autocomplete="username" /></div><div class="field"><label for="flexagent-login-password">FlexAgent password</label><input id="flexagent-login-password" required type="password" autocomplete="current-password" /></div><div class="field"><label for="flexagent-login-origin">Eval Tool origin</label><input id="flexagent-login-origin" required type="url" value="http://127.0.0.1:4173" /><span class="help">This exact origin must be allowed in the selected agent’s FlexAgent Embed settings.</span></div><div class="field full"><button class="button button-primary" type="submit">Connect FlexAgent</button><span class="help">Your password is used only to sign in. Eval Tool stores the returned access token encrypted on this computer.</span></div></form>`;
+  const flexAgentForm = `${flexAgentLogin}<details><summary>Manual FlexAgent target</summary><form id="flexagent-form" class="form-grid"><div class="field"><label for="flexagent-name">Name</label><input id="flexagent-name" value="FlexAgent target" /></div><div class="field"><label for="flexagent-url">FlexAgent API URL</label><input id="flexagent-url" required type="url" placeholder="https://flexagent.example.com" /></div><div class="field"><label for="flexagent-mode">Connection method</label><select id="flexagent-mode"><button type="button"><selectedcontent></selectedcontent></button><option value="api">Private evaluation API</option><option value="livekit">LiveKit widget path</option></select></div><div class="field"><label for="flexagent-org-id">Organization ID</label><input id="flexagent-org-id" required placeholder="FlexAgent organization ID" /></div><div class="field"><label for="flexagent-agent-id">Agent ID</label><input id="flexagent-agent-id" required placeholder="FlexAgent agent ID" /></div><div class="field"><label for="flexagent-origin">Eval Tool origin</label><input id="flexagent-origin" type="url" value="http://127.0.0.1:4173" /></div><div class="field full"><label for="flexagent-token">Evaluation service token</label><input id="flexagent-token" type="password" autocomplete="off" placeholder="Only required for Private evaluation API" /></div><div class="field full"><button class="button button-secondary" type="submit">Save FlexAgent target</button></div></form></details>`;
   const tabs = [
-    ['openai', 'OpenAI', true],
-    ['flexagent', 'FlexAgent', true],
-    ['instructions', 'Agent instructions', Boolean(promptForm)],
+    ['openai', 'OpenAI', true, 'API key and default models'],
+    ['flexagent', 'FlexAgent', true, 'Sign in and pick an agent'],
+    ['instructions', 'Agent instructions', Boolean(promptForm), 'How the agent answers per policy'],
     [
       'models',
       `Connected models${workspace.connections.length ? ` (${workspace.connections.length})` : ''}`,
       Boolean(connections),
+      'Agents and grader in use',
     ],
   ].filter(([, , available]) => available);
   const activeTab = tabs.some(([key]) => key === settingsTab) ? settingsTab : 'openai';
   const panel = (key, content) =>
     `<section id="settings-panel-${key}" class="panel card-pad settings-card" role="tabpanel" aria-labelledby="settings-tab-${key}" ${key === activeTab ? '' : 'hidden'}>${content}</section>`;
-  const tabList = `<div class="settings-tabs" role="tablist" aria-label="Settings sections">${tabs.map(([key, name]) => `<button id="settings-tab-${key}" class="settings-tab js-settings-tab" data-tab="${key}" type="button" role="tab" aria-controls="settings-panel-${key}" aria-selected="${key === activeTab}" tabindex="${key === activeTab ? 0 : -1}">${escapeHtml(name)}</button>`).join('')}</div>`;
-  return `${header('Settings', 'Connect OpenAI once, then choose the models used for your customer agent and evaluation.')}<div class="two-col settings-layout"><div class="settings-stack">${tabList}${panel('openai', `<h2 class="minor-title">Connect OpenAI</h2><form id="openai-form" class="form-grid"><div class="field full"><label for="openai-key">OpenAI API key</label><input id="openai-key" required type="password" autocomplete="off" placeholder="Paste your OpenAI API key" /><span class="help">It is encrypted by the server and never shown again.</span></div><div class="field"><label for="target-model">Target model</label><input id="target-model" required value="gpt-5.6-luna" placeholder="Model that answers customers" /></div><div class="field"><label for="control-model">Control model</label><input id="control-model" required value="gpt-5.6-terra" placeholder="Model that creates and judges datasets" /></div><div class="field full form-actions"><button class="button button-primary" type="submit">Save OpenAI setup</button><span class="help">Saving replaces the existing OpenAI setup. A model request will confirm that your account has available API credits.</span></div></form>`)}${panel('flexagent', flexAgentForm)}${promptForm ? panel('instructions', `<h2 class="minor-title">Agent instructions</h2>${promptForm}`) : ''}${connections ? panel('models', `<h2 class="minor-title">Connected models</h2>${connections}`) : ''}</div><aside class="callout"><h3>One key, two jobs</h3><p>Your customer-facing target model answers questions. The control model creates golden datasets, judges answers, and creates local retrieval embeddings.</p></aside></div>`;
+  const tabList = `<div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">${tabs.map(([key, name, , description]) => `<button id="settings-tab-${key}" class="settings-tab js-settings-tab" data-tab="${key}" type="button" role="tab" aria-controls="settings-panel-${key}" aria-selected="${key === activeTab}" tabindex="${key === activeTab ? 0 : -1}"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(description)}</small></button>`).join('')}</div>`;
+  return `${header('Settings', 'Connect OpenAI once, then choose the models used for your customer agent and evaluation.')}<div class="settings-layout">${tabList}<div class="settings-stack">${panel('openai', `<h2 class="minor-title">Connect OpenAI</h2><p class="settings-intro">One key, two jobs: the target model answers customers, and the control model writes golden datasets, grades answers, and powers source search.</p><form id="openai-form" class="form-grid"><div class="field full"><label for="openai-key">OpenAI API key</label><input id="openai-key" required type="password" autocomplete="off" placeholder="Paste your OpenAI API key" /><span class="help">It is encrypted by the server and never shown again.</span></div><div class="field"><label for="target-model">Target model</label><input id="target-model" required value="gpt-5.6-luna" placeholder="Model that answers customers" /></div><div class="field"><label for="control-model">Control model</label><input id="control-model" required value="gpt-5.6-terra" placeholder="Model that creates and judges datasets" /></div><div class="field full form-actions"><button class="button button-primary" type="submit">Save OpenAI setup</button><span class="help">Saving replaces the existing OpenAI setup. A model request will confirm that your account has available API credits.</span></div></form>`)}${panel('flexagent', flexAgentForm)}${promptForm ? panel('instructions', `<h2 class="minor-title">Agent instructions</h2><p class="settings-intro">Only used when this policy document is selected in customer chat or evaluation.</p>${promptForm}`) : ''}${connections ? panel('models', `<h2 class="minor-title">Connected models</h2><p class="settings-intro">The agents Verity can test, and the model that grades their answers.</p>${connections}`) : ''}</div></div>`;
 }
 
 function datasets() {
@@ -908,21 +907,32 @@ function datasets() {
     dataset => dataset.id === reviewingDatasetId && inSelectedWorkspace(dataset),
   );
   if (reviewing) return datasetReview(reviewing);
-  const drafts = workspace.datasets
-    .filter(inSelectedWorkspace)
-    .map(dataset => {
+  const kindLabel = item =>
+    item.kind === 'website'
+      ? 'Website snapshot'
+      : item.kind === 'technical'
+        ? 'Technical Blueprint'
+        : 'Operational document';
+  const visibleDatasets = workspace.datasets.filter(inSelectedWorkspace);
+  const cards = [
+    ...visibleDatasets.filter(dataset => dataset.status !== 'approved'),
+    ...visibleDatasets.filter(dataset => dataset.status === 'approved'),
+  ]
+    .map((dataset, index) => {
       const source = documents.find(item => item.id === dataset.documentId);
-      return `<div class="document-item"><span class="document-icon">SET</span><span><strong title="${escapeHtml(source?.name || 'Unknown document').replace(/"/g, '&quot;')}">${escapeHtml(source?.name || 'Unknown document')} · ${dataset.cases.length} scenarios</strong><small>${dataset.status === 'approved' ? 'Approved benchmark' : 'Draft ready for review'}</small></span><button class="button button-secondary button-small js-review-dataset" data-id="${escapeHtml(dataset.id)}" type="button">${dataset.status === 'approved' ? 'View dataset' : 'Review draft'}</button></div>`;
+      const approved = dataset.status === 'approved';
+      const name = source?.name || 'Unknown document';
+      return `<article class="datasets-card ${approved ? '' : 'is-draft'}" style="--i: ${index}"><span><strong title="${escapeHtml(name).replace(/"/g, '&quot;')}">${escapeHtml(name)}</strong><small>${source ? `${escapeHtml(kindLabel(source))} · ` : ''}${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'}</small></span><span class="datasets-state ${approved ? '' : 'warn'}">${approved ? 'Approved' : 'Needs review'}</span><div class="datasets-card-actions"><button class="button ${approved ? 'button-secondary' : 'button-primary'} button-small js-review-dataset" data-id="${escapeHtml(dataset.id)}" type="button">${approved ? 'View dataset' : 'Review draft'}</button></div></article>`;
     })
     .join('');
-  const library = drafts
-    ? `<section class="panel card-pad dataset-library"><span class="eyebrow">YOUR BENCHMARKS</span><h2 class="minor-title">Golden datasets</h2><div class="document-list">${drafts}</div></section>`
-    : `<aside class="callout dataset-guide"><span class="eyebrow">WHAT YOU WILL CREATE</span><h2>Your benchmark, not a guess</h2><p>Every approved case contains the customer scenario, expected outcome, required rules, and source evidence.</p><ol><li>Generate a draft from your document.</li><li>Check each expected answer and evidence.</li><li>Approve it for evaluation.</li></ol></aside>`;
+  const library =
+    cards ||
+    '<article class="datasets-empty"><strong>No golden datasets yet</strong><p>A golden dataset is the approved list of questions and correct answers your agent is tested against.</p><ol><li>Generate a draft from a source.</li><li>Check each expected answer and its evidence.</li><li>Approve it for evaluation.</li></ol></article>';
   const sourceLabel = item =>
     item.kind === 'website'
       ? `${item.name} (Website snapshot)`
       : `${item.name} (${item.kind === 'technical' ? 'Technical Blueprint' : 'Operational document'})`;
-  return `${header('Golden datasets', 'Create reviewable scenarios from a selected source.')}<div class="dataset-workspace"><section class="panel card-pad">${documents.length && controls.length ? `<h2 class="minor-title">Generate a draft dataset</h2><form id="generate-form" class="form-grid"><div class="field"><label for="dataset-document">Source</label><select id="dataset-document">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selectedDocumentId ? 'selected' : ''}>${escapeHtml(sourceLabel(item))}</option>`).join('')}</select></div><div class="field"><label for="dataset-count">Scenarios</label><input id="dataset-count" type="number" min="1" max="30" value="10" /></div><div class="field"><label for="dataset-decline-share">“Should decline” share (%)</label><input id="dataset-decline-share" type="number" min="0" max="50" value="20" /><span class="help">Questions the source does not answer, to check the agent says so instead of inventing details. 0 turns them off.</span></div><div class="field full"><label for="dataset-control">Control model</label><select id="dataset-control">${controls.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field full"><button class="button button-primary" type="submit">Generate draft scenarios</button><p id="generation-status" class="help" aria-live="polite">The control model drafts source-backed scenarios for review.</p></div></form>` : '<h2 class="minor-title">No sources or control model yet</h2><p class="page-subtitle">Add a source and a control-model connection in Settings.</p>'}</section>${library}</div>`;
+  return `${header('Golden datasets', 'Create reviewable scenarios from a selected source.')}<div class="datasets-layout"><section class="datasets-list" aria-label="Your golden datasets">${library}</section><aside class="datasets-generate"><h2>Generate a draft dataset</h2>${documents.length && controls.length ? `<form id="generate-form" class="datasets-form"><div class="field"><label for="dataset-document">Source</label><select id="dataset-document"><button type="button"><selectedcontent></selectedcontent></button>${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selectedDocumentId ? 'selected' : ''}>${escapeHtml(sourceLabel(item))}</option>`).join('')}</select></div><div class="datasets-pair"><div class="field"><label for="dataset-count">Scenarios</label><input id="dataset-count" type="number" min="1" max="30" value="10" /></div><div class="field"><label for="dataset-decline-share">Should decline (%)</label><input id="dataset-decline-share" type="number" min="0" max="50" value="20" /></div></div><span class="help">Questions the source can’t answer, to check the agent doesn’t invent details. 0 turns them off.</span><div class="field"><label for="dataset-control">Control model</label><select id="dataset-control"><button type="button"><selectedcontent></selectedcontent></button>${controls.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></div><button class="button button-primary" type="submit">Generate draft scenarios</button><p id="generation-status" class="help" aria-live="polite">The control model drafts source-backed scenarios for review.</p></form>` : '<p>Add a source, and a control-model connection in Settings, to generate a draft.</p>'}</aside></div>`;
 }
 
 function chat() {
@@ -939,6 +949,12 @@ function chat() {
   const active = workspace.chats.find(item => item.id === activeChatId);
   const documentId = active?.documentId || chatDocumentId || documents[0]?.id;
   const targetId = active?.connectionId || chatTargetId || targets[0]?.id;
+  const examples = [
+    'What can you help me with?',
+    'How do I cancel or change a booking?',
+    'Who do I contact if something goes wrong?',
+  ];
+  // The empty state stays in #chat-messages and hides itself once askCustomerAgent adds a message.
   const messages = active?.messages?.length
     ? active.messages
         .map(
@@ -946,7 +962,7 @@ function chat() {
             `<article class="message ${message.role === 'user' ? 'user' : 'agent'}"><span class="who">${message.role === 'user' ? 'You' : 'Agent'}</span><div class="bubble">${escapeHtml(message.content)}</div></article>`,
         )
         .join('')
-    : '<p class="chat-empty">Ask a question about the selected document.</p>';
+    : `<div class="chat-empty"><strong>Ask your first question</strong><p>Ask what a real customer would ask. The agent answers using only the selected source.</p><div class="chat-examples">${examples.map(example => `<button class="chat-example js-chat-example" type="button">${example}</button>`).join('')}</div></div>`;
   const history = workspace.chats
     .map(item => {
       const sourceName = allDocuments().find(document => document.id === item.documentId)?.name || 'Document';
@@ -957,7 +973,9 @@ function chat() {
     item.kind === 'website'
       ? `${item.name} (Website snapshot)`
       : `${item.name} (${item.kind === 'technical' ? 'Technical Blueprint' : 'Operational document'})`;
-  return `${header('Customer chat', 'Ask a target agent questions grounded in the selected source.')}${documents.length && targets.length ? `<div class="chat-shell"><aside class="chat-history"><button class="button button-secondary js-new-chat" type="button">+ New chat</button><span class="history-label">RECENT CHATS</span>${history}</aside><section class="panel chat-window"><div class="chat-title"><div><strong>Grounded agent</strong><span>Source-backed answers</span></div><div class="chat-config"><label>Source<select id="chat-document">${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === documentId ? 'selected' : ''}>${escapeHtml(label(item))}</option>`).join('')}</select></label><label>Agent<select id="chat-target">${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === targetId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label></div></div><div id="chat-messages" class="messages">${messages}</div><form id="customer-chat-form" class="chat-compose"><textarea id="customer-question" required rows="1" placeholder="Ask a question…" aria-label="Message"></textarea><button class="button button-primary" type="submit">Send</button></form></section></div>` : '<section class="panel card-pad"><h2 class="minor-title">Customer chat is not configured yet</h2><p class="page-subtitle">Add a source and a model target in Settings.</p></section>'}`;
+  const selectedTarget = targets.find(item => item.id === targetId);
+  const selectedDocument = documents.find(item => item.id === documentId);
+  return `${header('Customer chat', 'Talk to an agent as a customer would, with answers grounded in the source you pick.')}${documents.length && targets.length ? `<div class="chat-shell"><section class="panel chat-window"><div class="chat-title"><span class="connection-role">AI</span><div><strong>${escapeHtml(selectedTarget?.name || 'Agent')}</strong><small>Answers from ${escapeHtml(selectedDocument?.name || 'the selected source')}</small></div></div><div id="chat-messages" class="messages">${messages}</div><form id="customer-chat-form" class="chat-compose"><textarea id="customer-question" required rows="1" placeholder="Ask a question…" aria-label="Message"></textarea><button class="button button-primary" type="submit">Send</button></form></section><aside class="chat-setup"><h2>Chat setup</h2><div class="field"><label for="chat-target">Agent</label><select id="chat-target"><button type="button"><selectedcontent></selectedcontent></button>${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === targetId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="chat-document">Answers from</label><select id="chat-document"><button type="button"><selectedcontent></selectedcontent></button>${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === documentId ? 'selected' : ''}>${escapeHtml(label(item))}</option>`).join('')}</select></div><button class="button button-secondary js-new-chat" type="button">+ New chat</button><hr /><div class="chat-history"><span class="history-label">Recent chats</span>${history || '<p class="chat-history-empty">No chats yet. Your conversations will appear here.</p>'}</div></aside></div>` : '<section class="panel card-pad"><h2 class="minor-title">Customer chat is not configured yet</h2><p class="page-subtitle">Add a source and a model target in Settings.</p></section>'}`;
 }
 
 const pages = { home, evaluation, documents, technical, datasets, chat, results, settings };
@@ -1131,7 +1149,7 @@ function bind(page) {
     .querySelectorAll('.js-settings-tab')
     .forEach(tab => tab.addEventListener('click', () => showSettingsTab(tab.dataset.tab)));
   document.querySelector('.settings-tabs')?.addEventListener('keydown', event => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
     const tabs = [...document.querySelectorAll('.js-settings-tab')];
     const current = tabs.findIndex(tab => tab.getAttribute('aria-selected') === 'true');
     const next =
@@ -1139,7 +1157,7 @@ function bind(page) {
         ? 0
         : event.key === 'End'
           ? tabs.length - 1
-          : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+          : (current + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length;
     event.preventDefault();
     showSettingsTab(tabs[next].dataset.tab);
     tabs[next].focus();
@@ -1293,6 +1311,8 @@ function bind(page) {
   document
     .querySelectorAll('.js-approve')
     .forEach(button => button.addEventListener('click', () => approveDataset(button.dataset.id)));
+  const chatMessages = document.querySelector('#chat-messages');
+  if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight; // Open a chat at its newest message.
   document.querySelector('#customer-chat-form')?.addEventListener('submit', askCustomerAgent);
   document.querySelector('#customer-question')?.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1307,6 +1327,13 @@ function bind(page) {
       chatDocumentId = chat.documentId;
       chatTargetId = chat.connectionId;
       render('chat');
+    }),
+  );
+  document.querySelectorAll('.js-chat-example').forEach(button =>
+    button.addEventListener('click', () => {
+      const input = document.querySelector('#customer-question');
+      input.value = button.textContent;
+      input.focus();
     }),
   );
   document.querySelector('.js-new-chat')?.addEventListener('click', () => {
@@ -2116,7 +2143,7 @@ async function askCustomerAgent(event) {
   const output = document.querySelector('#chat-messages');
   output.insertAdjacentHTML(
     'beforeend',
-    `<article class="message user"><span class="who">You</span><div class="bubble">${escapeHtml(question)}</div></article><article class="message agent"><span class="who">Support agent</span><div class="bubble">Thinking…</div></article>`,
+    `<article class="message user"><span class="who">You</span><div class="bubble">${escapeHtml(question)}</div></article><article class="message agent"><span class="who">Support agent</span><div class="bubble is-thinking" role="status" aria-label="Thinking"><span></span><span></span><span></span></div></article>`,
   );
   output.scrollTop = output.scrollHeight;
   try {
@@ -2152,7 +2179,7 @@ async function runEvaluation(event) {
   const help = form.querySelector('.help');
   button.disabled = true;
   button.textContent = 'Running evaluation…';
-  help.textContent = 'Checking each scenario—your policy is getting a careful read.';
+  help.textContent = 'Checking each scenario. This can take a minute.';
   try {
     const datasetId = document.querySelector('#evaluation-dataset').value;
     const targetConnectionId = document.querySelector('#evaluation-target').value;
