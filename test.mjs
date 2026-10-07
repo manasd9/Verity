@@ -307,6 +307,19 @@ assert.match(
   css,
   /\.sources-item-actions \.button-secondary:not\(:disabled\):hover \{ border-color: var\(--accent\); background: #fdf1ed; \}/,
 );
+// The Organization / Agent strip uses the styleable select like the in-page dropdowns.
+assert.match(
+  js,
+  /<select id="workspace-organization"><button type="button"><selectedcontent><\/selectedcontent><\/button>/,
+);
+assert.match(
+  js,
+  /'disabled' : ''\}><button type="button"><selectedcontent><\/selectedcontent><\/button>\$\{agentOptions\}/,
+);
+assert.match(
+  css,
+  /\.workspace-scope select, \.workspace-scope select::picker\(select\) \{ appearance: base-select; \}/,
+);
 assert.match(js, /gpt-5\.6-luna/);
 assert.match(js, /gpt-5\.6-terra/);
 assert.match(js, /Generating scenarios/);

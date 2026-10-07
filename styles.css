@@ -130,7 +130,6 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 720px) { .sidebar { display: block; }.brand { display: inline-flex; }.nav-links { margin-top: 13px; width: 100%; }.nav-link { font-size: 12px; }.main-content { padding: 28px 18px 40px; }.page-top { display: grid; }.metrics, .two-col, .form-grid, .chat-layout, .chat-shell, .results-grid, .comparison, .evaluation-detail, .blueprint-layout, .blueprint-facts, .blueprint-catalog dl, .blueprint-examples, .blueprint-workspace, .catalog-group dl, .workflow-guide ol { grid-template-columns: 1fr; }.workflow-guide-head { display: grid; }.welcome-hero { padding: 25px; }.blueprint-top, .blueprint-actions { display: grid; }.blueprint-actions { justify-items: start; }.blueprint-search { width: 100%; }.blueprint-title-row { align-items: start; flex-direction: column; gap: 8px; }.blueprint-title-row h1 { font-size: 30px; }.blueprint-tabs { overflow-x: auto; gap: 20px; white-space: nowrap; }.blueprint-upload { align-items: flex-start; flex-direction: column; }.evaluation-detail { padding-left: 0; }.chat-config { width: 100%; }.chat-config select { max-width: 100%; }.run-row { grid-template-columns: 1fr auto; }.run-info { display: none; }.row-link { display: none; }.runner-body { grid-template-columns: 1fr; }.runner-step { border-right: 0; border-bottom: 1px solid var(--line); }.runner-header { display: grid; }.runner-state { margin-left: 0; text-align: left; }.dataset-table th:nth-child(3), .dataset-table td:nth-child(3) { display: none; } }
 @media (max-width: 720px) { .dataset-workspace { grid-template-columns: 1fr; } }
 .file-drop { min-height: 120px; justify-items: center; }
-.workspace-scope { margin-bottom: 20px; }.workspace-scope .help { margin: 12px 0 0; }.workspace-scope a { display: inline-block; margin-top: 8px; font-size: 12px; }
 @media (max-width: 720px) { .flexagent-connection dl { grid-template-columns: 1fr; }.flexagent-connection dl div + div { border-top: 1px solid #dfe9e5; border-left: 0; } }
 .gap-diagnosis { grid-column: 1 / -1; border: 1px solid #edc8c2; border-left: 3px solid var(--danger); background: #fff4f1 !important; }.gap-diagnosis h3 { margin: 0 0 10px; font-size: 13px; }.gap-diagnosis p { margin: 7px 0; }.gap-diagnosis p b { color: var(--ink); font-size: 11px; letter-spacing: 0; text-transform: none; }.gap-diagnosis small { display: block; margin-top: 10px; color: #7c5f59; font-size: 11px; line-height: 1.45; }
 .evaluation-diagnosis { margin: 16px 0; background: #f3f8f6; border-color: #d2e5db; }.evaluation-diagnosis .eyebrow { margin: 0 0 7px; }.evaluation-diagnosis h2 { margin: 0 0 9px; font-size: 19px; letter-spacing: -.4px; }.evaluation-diagnosis-finding { max-width: 920px; margin: 0; font-size: 13px; line-height: 1.6; }.evaluation-diagnosis-counts { display: flex; flex-wrap: wrap; gap: 8px; margin: 17px 0; }.evaluation-diagnosis-counts span { padding: 8px 11px; border: 1px solid #d8e8df; border-radius: 8px; background: white; color: #4b635c; font-size: 12px; }.evaluation-diagnosis-counts b { color: var(--ink); font-size: 17px; margin-right: 3px; }.evaluation-diagnosis ol { margin: 0; padding-left: 21px; }.evaluation-diagnosis li { padding: 5px 0; color: #354e46; font-size: 12px; line-height: 1.55; }.evaluation-diagnosis-limit { margin: 14px 0 0; color: #64796f; font-size: 11px; line-height: 1.5; }
@@ -636,6 +635,31 @@ a { color: inherit; text-decoration: none; }
 @keyframes blueprint-rise { from { opacity: 0; transform: translateY(8px); } }
 @keyframes blueprint-slide { from { opacity: 0; transform: translateX(12px); } }
 @media (max-width: 980px) { .blueprint-page { grid-template-columns: 1fr; }.blueprint-rail { position: static; order: -1; } }
+/* Workspace scope: Organization / Agent as a thin pill strip above every scoped page */
+.workspace-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.workspace-scope .field { display: block; flex: 1 1 220px; min-width: 0; }
+.workspace-scope label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.workspace-scope select { min-height: 38px; padding: 0 14px; border: 1px solid transparent; border-radius: 999px; background: var(--soft); color: var(--ink); font-weight: 700; transition: background .15s ease, border-color .15s ease; }
+.workspace-scope select:not(:disabled):hover { border-color: #a8c9bc; background: white; }
+.workspace-scope select:disabled { color: var(--muted); font-weight: 600; opacity: .7; cursor: not-allowed; }
+.workspace-scope-slash { color: #a8c9bc; font-size: 18px; }
+.workspace-scope .help { flex-basis: 100%; margin: 2px 0 0; font-size: 12px; }
+.workspace-scope a { font-size: 12px; }
+@supports (appearance: base-select) {
+  .workspace-scope select, .workspace-scope select::picker(select) { appearance: base-select; }
+  .workspace-scope select { display: flex; align-items: center; }
+  .workspace-scope select::picker-icon { color: var(--muted); }
+  .workspace-scope select > button { display: flex; flex: 1; min-width: 0; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
+  .workspace-scope select selectedcontent { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+  .workspace-scope select::picker(select) { width: anchor-size(width); max-height: 320px; margin: 4px 0; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: white; box-shadow: 0 12px 28px rgba(20, 39, 43, .18); }
+  .workspace-scope select option { padding: 9px 10px; border-radius: 7px; color: var(--ink); font-size: 13px; font-weight: 400; line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
+  .workspace-scope select option::checkmark { display: none; }
+  .workspace-scope select option:hover, .workspace-scope select option:focus-visible { background: var(--soft); outline: none; }
+  .workspace-scope select option:checked { background: #e2efea; color: var(--green); font-weight: 700; }
+  .workspace-scope select option:disabled { color: var(--muted); }
+}
+@media (max-width: 560px) { .workspace-scope-slash { display: none; } }
+
 /* Results: scenario list + one result at a time (presentation only) */
 .result-layout { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 20px; align-items: start; margin-top: 16px; }
 .result-layout [hidden] { display: none !important; }

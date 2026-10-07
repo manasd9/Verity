@@ -85,7 +85,7 @@ function scopeControls() {
           : !viewScope.agentId
             ? 'Choose an agent to view its sources and evaluations.'
             : `Showing Eval Tool records for ${escapeHtml(agents.find(agent => agent.id === viewScope.agentId)?.name || viewScope.agentId)}. Clients manage this agent’s FlexAgent knowledge base separately.`;
-  return `<section class="panel card-pad workspace-scope" aria-label="Evaluation workspace"><div class="form-grid"><div class="field"><label for="workspace-organization">Organization</label><select id="workspace-organization">${orgOptions}</select></div><div class="field"><label for="workspace-agent">Agent</label><select id="workspace-agent" ${workspaceMode !== 'flex' || !viewScope?.orgId ? 'disabled' : ''}>${agentOptions}</select></div></div><p class="help">${help}</p>${workspaceMode === 'flex' && !connected ? '<a href="#settings">Open Settings</a>' : ''}</section>`;
+  return `<section class="workspace-scope" aria-label="Evaluation workspace"><div class="field"><label for="workspace-organization">Organization</label><select id="workspace-organization"><button type="button"><selectedcontent></selectedcontent></button>${orgOptions}</select></div><span class="workspace-scope-slash" aria-hidden="true">/</span><div class="field"><label for="workspace-agent">Agent</label><select id="workspace-agent" ${workspaceMode !== 'flex' || !viewScope?.orgId ? 'disabled' : ''}><button type="button"><selectedcontent></selectedcontent></button>${agentOptions}</select></div><p class="help">${help}</p>${workspaceMode === 'flex' && !connected ? '<a href="#settings">Open Settings</a>' : ''}</section>`;
 }
 let reviewingDatasetId = null;
 let reviewScenarioIndex = 0;
