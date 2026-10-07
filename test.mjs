@@ -328,6 +328,14 @@ assert.match(js, /signal: cancel\.signal,/);
 // A running generation lives outside the page: every render puts its progress card back, so Cancel still works after you leave and return.
 assert.match(js, /addEventListener\('submit', generateDataset\);\n  showGenerationProgress\(\);/);
 assert.match(js, /if \(generation\) return;/);
+// Loading the FlexAgent lists after the first draw swaps only the Organization / Agent strip, so the page doesn't blink.
+assert.match(js, /if \(refresh && page === renderedPage && body === renderedBody\) \{/);
+assert.equal(
+  (topLevel(js, 'loadFlexAgentOrganizations').match(/render\(undefined, \{ refresh: true \}\)/g) || []).length,
+  2,
+);
+assert.equal((topLevel(js, 'loadFlexAgentAgents').match(/render\(undefined, \{ refresh: true \}\)/g) || []).length, 2);
+assert.match(topLevel(js, 'bind'), /^function bind\(page\) \{\n  bindScope\(page\);/);
 assert.match(js, /hideGenerationProgress\('Generation cancelled\. Nothing was saved\.'\)/);
 // A draft that finishes while you are on another page does not pull you back to Golden datasets.
 assert.match(

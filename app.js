@@ -828,9 +828,25 @@ function chat() {
 }
 
 const pages = { home, evaluation, documents, technical, datasets, chat, results, settings };
-function render(page = location.hash.slice(1).split(':')[0] || 'home') {
+let renderedPage = null;
+let renderedBody = null;
+// refresh: true is for background loads (the FlexAgent organization and agent lists). When the page body is unchanged,
+// only the Organization / Agent strip is swapped, so the page doesn't redraw and replay its entrance animation.
+function render(page = location.hash.slice(1).split(':')[0] || 'home', { refresh = false } = {}) {
   const scopedPages = new Set(['documents', 'datasets', 'evaluation', 'results', 'technical']);
-  app.innerHTML = `${scopedPages.has(page) ? scopeControls() : ''}${pages[page] ? pages[page]() : pages.home()}`;
+  const scope = scopedPages.has(page) ? scopeControls() : '';
+  const body = pages[page] ? pages[page]() : pages.home();
+  if (refresh && page === renderedPage && body === renderedBody) {
+    const strip = app.querySelector('.workspace-scope');
+    if (strip && strip.outerHTML !== scope) {
+      strip.outerHTML = scope;
+      bindScope(page);
+    }
+    return;
+  }
+  renderedPage = page;
+  renderedBody = body;
+  app.innerHTML = `${scope}${body}`;
   if (!canWriteWorkspace())
     app
       .querySelectorAll(
@@ -844,7 +860,7 @@ function render(page = location.hash.slice(1).split(':')[0] || 'home') {
   bind(page);
 }
 
-function bind(page) {
+function bindScope(page) {
   document.querySelector('#workspace-organization')?.addEventListener('change', async event => {
     const orgId = event.target.value;
     if (orgId === 'local') {
@@ -881,6 +897,10 @@ function bind(page) {
       render(page);
     } else selectFlexAgent(event);
   });
+}
+
+function bind(page) {
+  bindScope(page);
   document.querySelectorAll('[data-page]').forEach(link =>
     link.addEventListener('click', event => {
       event.preventDefault();
@@ -1553,14 +1573,14 @@ async function loadFlexAgentOrganizations(showToast = true) {
     if (!response.ok) throw new Error(body.error);
     flexAgentOrganizations = body.organizations;
     await loadWorkspace();
-    render();
+    render(undefined, { refresh: true });
     if (showToast) toast(`${body.organizations.length} organizations loaded.`);
     if (workspace.flexAgentSession?.orgId) await loadFlexAgentAgents(false);
     return true;
   } catch (error) {
     await loadWorkspace();
     flexAgentOrganizations = [];
-    render();
+    render(undefined, { refresh: true });
     toast(error.message || 'FlexAgent organizations could not be loaded.');
     return false;
   }
@@ -1604,13 +1624,13 @@ async function loadFlexAgentAgents(showToast = true) {
     if (!response.ok) throw new Error(body.error);
     flexAgentAgents = body.agents;
     await loadWorkspace();
-    render();
+    render(undefined, { refresh: true });
     if (showToast) toast(`${body.agents.length} FlexAgents loaded.`);
     return true;
   } catch (error) {
     await loadWorkspace();
     flexAgentAgents = [];
-    render();
+    render(undefined, { refresh: true });
     toast(error.message || 'FlexAgent agents could not be loaded.');
     return false;
   }
