@@ -331,7 +331,7 @@ function technicalAnalysis(analysis) {
 }
 
 function technical() {
-  const documents = workspace.technicalDocuments || [];
+  const documents = (workspace.technicalDocuments || []).filter(inSelectedWorkspace);
   const selected = documents.find(item => item.id === location.hash.split(':')[1]) || documents[0];
   const detail =
     selected?.analysisStatus === 'ready'
@@ -1354,7 +1354,8 @@ async function removeTechnicalDocument(id) {
     workspace.chats = workspace.chats.filter(item => item.documentId !== id);
     workspace.agentConfigs = workspace.agentConfigs.filter(item => item.documentId !== id);
     if (activeChatId && !workspace.chats.some(item => item.id === activeChatId)) activeChatId = null;
-    location.hash = workspace.technicalDocuments[0] ? `technical:${workspace.technicalDocuments[0].id}` : 'technical';
+    const next = workspace.technicalDocuments.find(inSelectedWorkspace);
+    location.hash = next ? `technical:${next.id}` : 'technical';
     render('technical');
     toast('Technical document and its related data removed.');
   } catch (error) {

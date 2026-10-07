@@ -275,6 +275,12 @@ assert.doesNotMatch(js, /The system chooses the appropriate documented path\.<\/
 // The Technical Blueprint entrance animation only runs when the system allows motion.
 assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.blueprint-rail/);
 assert.match(js, /allDocuments/);
+// Technical Blueprint lists only the selected workspace's documents, like Sources and Golden datasets.
+assert.match(
+  topLevel(js, 'technical'),
+  /const documents = \(workspace\.technicalDocuments \|\| \[\]\)\.filter\(inSelectedWorkspace\);/,
+);
+assert.match(js, /const next = workspace\.technicalDocuments\.find\(inSelectedWorkspace\);/);
 assert.match(js, /<aside class="sources-add"><div><h2>Add a source<\/h2>/);
 assert.match(js, /<form id="website-form" class="sources-website">/);
 assert.doesNotMatch(js, /What happens next<\/h3>/);
