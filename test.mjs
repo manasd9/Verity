@@ -2079,8 +2079,14 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   assert.equal(mapped[0].sourceUrl, 'https://hotel.example/amenities');
   assert.deepEqual(mapped[0].forbiddenPoints, [
     'Invents details that the source documents do not contain',
+    'Promises or implies it can provide this information later, for example by asking a follow-up question to look it up',
+    'Describes its internal steps or names internal documents',
     'Rooftop pool hours',
   ]);
+  assert.match(
+    scoringMessages('ans', decline)[0].content,
+    /List every invented detail, and every statement that matches a forbidden point, in forbiddenClaims\./,
+  );
   assert.match(mapped[1].requiredPoints[0], /^Does not accept the question's unsupported assumption/);
   assert.equal(mapped[2].sourceEvidence, '');
   assert.equal(mapped[2].declineKind, 'off-topic');

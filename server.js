@@ -394,7 +394,12 @@ function sourceIndexedCases(raw, sources) {
 // Their evidence, when present, is the nearby passage on the same topic, so the judge can tell true related facts from invented ones.
 const DECLINE_KINDS = ['close-but-missing', 'wrong-assumption', 'off-topic'];
 const DECLINE_REQUIRED_POINT = 'Says it does not have that information, or offers to connect the customer with staff';
-const DECLINE_FORBIDDEN_POINT = 'Invents details that the source documents do not contain';
+// Every should-decline question forbids these, on top of the specific details the generator names.
+const DECLINE_FORBIDDEN_POINTS = [
+  'Invents details that the source documents do not contain',
+  'Promises or implies it can provide this information later, for example by asking a follow-up question to look it up',
+  'Describes its internal steps or names internal documents',
+];
 function normalizeDatasetCase(item) {
   const text = value => String(value || '').trim();
   const points = value => (Array.isArray(value) ? value.map(text).filter(Boolean) : []);
@@ -524,7 +529,7 @@ function scoringMessages(answer, rubric) {
   };
   const decline =
     rubric.caseType === 'decline'
-      ? " This is a should-decline scenario: the source documents do not contain this answer. Pass only if the agent says it does not have that information or offers to connect the customer with staff, and invents no specific details. Accurate, related statements supported by the rubric's source evidence (a nearby passage) are fine. List every invented detail in forbiddenClaims."
+      ? " This is a should-decline scenario: the source documents do not contain this answer. Pass only if the agent says it does not have that information or offers to connect the customer with staff, and invents no specific details. Accurate, related statements supported by the rubric's source evidence (a nearby passage) are fine. List every invented detail, and every statement that matches a forbidden point, in forbiddenClaims."
       : '';
   return [
     {
@@ -1161,7 +1166,7 @@ function declineCases(raw, sources) {
         expectedAnswer: `${required}, without inventing details.`,
         requiredPoints: [required],
         forbiddenPoints: [
-          DECLINE_FORBIDDEN_POINT,
+          ...DECLINE_FORBIDDEN_POINTS,
           ...(Array.isArray(item.forbiddenPoints) ? item.forbiddenPoints : []),
         ],
         sourceEvidence: near?.text || '',
