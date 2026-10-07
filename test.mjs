@@ -322,7 +322,20 @@ assert.match(
 );
 assert.match(js, /gpt-5\.6-luna/);
 assert.match(js, /gpt-5\.6-terra/);
-assert.match(js, /Generating scenarios/);
+// While a draft generates, a progress card with Cancel replaces the button; Cancel aborts the request.
+assert.match(js, /<strong>Generating \$\{escapeHtml\(generation\.count\)\}/);
+assert.match(js, /signal: cancel\.signal,/);
+// A running generation lives outside the page: every render puts its progress card back, so Cancel still works after you leave and return.
+assert.match(js, /addEventListener\('submit', generateDataset\);\n  showGenerationProgress\(\);/);
+assert.match(js, /if \(generation\) return;/);
+assert.match(js, /hideGenerationProgress\('Generation cancelled\. Nothing was saved\.'\)/);
+// A draft that finishes while you are on another page does not pull you back to Golden datasets.
+assert.match(
+  js,
+  /if \(\(location\.hash\.slice\(1\)\.split\(':'\)\[0\] \|\| 'home'\) === 'datasets'\) \{\n      render\('datasets'\);/,
+);
+// The progress card only animates when the system allows motion.
+assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.datasets-progress \{/);
 assert.match(js, /Review draft/);
 assert.match(js, /Review golden dataset/);
 assert.match(js, /Add scenario/);
@@ -2747,6 +2760,66 @@ try {
     false,
   );
   assert.equal(noDeclines.body.declineCheck, undefined);
+  // Cancelling a generation closes its request: the model calls stop and no draft is saved, even mid decline step.
+  {
+    const datasetsBefore = (await requestApp(listener, 'GET', '/api/state')).body.datasets.length;
+    const mockedFetch = globalThis.fetch;
+    const within = (promise, label) =>
+      Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 3000)),
+      ]);
+    let declineCall;
+    const reachedDeclines = new Promise(resolve => {
+      globalThis.fetch = (url, options = {}) => {
+        if (
+          String(url).endsWith('/chat/completions') &&
+          JSON.parse(options.body).messages[0].content.startsWith('You create precise test datasets')
+        )
+          return new Promise((_, reject) => {
+            declineCall = {
+              signal: options.signal,
+              aborted: new Promise(done => options.signal?.addEventListener('abort', done)),
+            };
+            options.signal?.addEventListener('abort', () => reject(options.signal.reason));
+            resolve();
+          });
+        return mockedFetch(url, options);
+      };
+    });
+    let pending;
+    try {
+      pending = httpRequest({
+        host: '127.0.0.1',
+        port: listener.address().port,
+        method: 'POST',
+        path: '/api/datasets/generate',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      pending.on('error', () => {});
+      pending.end(
+        JSON.stringify({
+          documentId: scopedDocument.body.id,
+          connectionId: control.body.id,
+          count: 10,
+          declineShare: 20,
+        }),
+      );
+      await within(reachedDeclines, 'the decline step');
+      assert.ok(declineCall.signal, 'model calls carry the cancel signal');
+      pending.destroy();
+      await within(declineCall.aborted, 'the model call to be aborted');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(
+        (await requestApp(listener, 'GET', '/api/state')).body.datasets.length,
+        datasetsBefore,
+        'a cancelled generation saves no draft',
+      );
+    } finally {
+      pending?.destroy();
+      globalThis.fetch = mockedFetch;
+    }
+  }
   const savedMixed = await requestApp(listener, 'PUT', `/api/datasets/${mixed.body.id}`, {
     cases: mixed.body.cases.map(item => (item.caseType === 'decline' ? { ...item, sourceEvidence: '' } : item)),
   });

@@ -569,12 +569,13 @@ async function extractText(file) {
   if (extension === '.txt') return file.buffer.toString('utf8');
   throw new Error('Only PDF, DOCX, and TXT files are supported.');
 }
-async function callModel(connection, messages, json = false, { judge = false } = {}) {
+async function callModel(connection, messages, json = false, { judge = false, signal } = {}) {
   const base = connection.baseUrl.replace(/\/$/, '');
   if (judge && !connection.judgeSupport) saveJudgeSupport(connection, await checkJudgeSupport(connection)); // Connections added before the check existed.
   const send = () =>
     safeFetch(`${base}/chat/completions`, {
       method: 'POST',
+      signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(connection.secret)}` },
       body: JSON.stringify({
         model: connection.model,
@@ -1223,7 +1224,7 @@ function declineCandidatePassages(questions, passages, questionVectors = []) {
   });
 }
 // Drops should-decline questions that any source Verity holds does answer. One judge call per generation.
-async function checkDeclineCases(store, source, control, cases) {
+async function checkDeclineCases(store, source, control, cases, signal) {
   const sources = scopedSources(store, source);
   const passages = sources.flatMap(item =>
     sourcePassages(item).map(passage => ({ ...passage, sourceName: item.name })),
@@ -1269,6 +1270,7 @@ async function checkDeclineCases(store, source, control, cases) {
       },
     ],
     true,
+    { signal },
   );
   const results = JSON.parse(raw).results;
   if (!Array.isArray(results)) throw new Error('The control model did not return a check result.');
@@ -1969,6 +1971,11 @@ app.post('/api/chat', async (req, res, next) => {
   }
 });
 app.post('/api/datasets/generate', async (req, res, next) => {
+  const cancel = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) cancel.abort();
+  });
+  const { signal } = cancel;
   try {
     const { documentId, connectionId, count = 10, declineShare = 20 } = req.body;
     const store = readStore();
@@ -1994,6 +2001,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
         sources,
       ),
       true,
+      { signal },
     );
     const answerCases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!answerCases.length)
@@ -2003,10 +2011,10 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     if (declineCount) {
       try {
         const generated = declineCases(
-          await callModel(connection, declineGenerationMessages(declineCount, sources), true),
+          await callModel(connection, declineGenerationMessages(declineCount, sources), true, { signal }),
           sources,
         ).slice(0, declineCount);
-        const checked = await checkDeclineCases(store, document, connection, generated);
+        const checked = await checkDeclineCases(store, document, connection, generated, signal);
         declines = checked.kept;
         declineCheck = {
           requested: declineCount,
@@ -2036,10 +2044,12 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const latestSource = resolveDocument(latest, documentId);
     if (!latestSource || !sameScope(latestSource, document))
       throw new Error('The source changed while generating the dataset. Try again.');
+    if (signal.aborted) return;
     latest.datasets.push(dataset);
     saveStore(latest);
     res.status(201).json(publicDataset(latest, dataset));
   } catch (error) {
+    if (signal.aborted) return;
     next(error);
   }
 });

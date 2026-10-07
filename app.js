@@ -1035,6 +1035,7 @@ function bind(page) {
     .querySelectorAll('.js-check-judge')
     .forEach(button => button.addEventListener('click', () => checkJudgeModel(button)));
   document.querySelector('#generate-form')?.addEventListener('submit', generateDataset);
+  showGenerationProgress();
   document.querySelector('#dataset-document')?.addEventListener('change', event => {
     datasetDocumentId = event.target.value;
   });
@@ -1799,37 +1800,93 @@ async function removeConnection(id) {
   }
 }
 
+// The draft being generated. Kept outside the page so leaving Golden datasets and coming back shows it still running.
+let generation = null;
+const generationFields = ['dataset-document', 'dataset-count', 'dataset-decline-share', 'dataset-control'];
+
+// Lock the form and show the progress card for the running generation. Called again after every render.
+function showGenerationProgress() {
+  const form = document.querySelector('#generate-form');
+  if (!generation || !form || form.querySelector('.datasets-progress')) return;
+  for (const id of generationFields) {
+    const field = form.querySelector(`#${id}`);
+    if (!field) continue;
+    field.value = generation.values[id];
+    if (field.disabled) continue;
+    field.disabled = true;
+    field.dataset.generationLocked = '';
+  }
+  const submit = form.querySelector('button[type="submit"]');
+  const progress = form.querySelector('#generation-status');
+  submit.hidden = true;
+  progress.hidden = true;
+  progress.classList.remove('is-cancelled');
+  submit.insertAdjacentHTML(
+    'afterend',
+    `<div class="datasets-progress" role="status"><div class="datasets-progress-top"><strong>Generating ${escapeHtml(generation.count)} ${generation.count === 1 ? 'scenario' : 'scenarios'}…</strong><button class="datasets-cancel js-cancel-generation" type="button">Cancel</button></div><div class="datasets-progress-bar"><span></span></div><p>Reading the selected document and creating the draft. This can take a minute.</p></div>`,
+  );
+  const cancelButton = form.querySelector('.js-cancel-generation');
+  cancelButton.disabled = generation.answered;
+  cancelButton.addEventListener('click', () => generation?.cancel.abort());
+}
+
+// Unlock the form on whatever Golden datasets page is showing now, if any.
+function hideGenerationProgress(message) {
+  const form = document.querySelector('#generate-form');
+  if (!form) return null;
+  form.querySelector('.datasets-progress')?.remove();
+  form.querySelectorAll('[data-generation-locked]').forEach(field => {
+    field.disabled = false;
+    delete field.dataset.generationLocked;
+  });
+  form.querySelector('button[type="submit"]').hidden = false;
+  const progress = form.querySelector('#generation-status');
+  progress.hidden = false;
+  progress.textContent = message;
+  return progress;
+}
+
 async function generateDataset(event) {
   event.preventDefault();
-  const form = event.currentTarget;
-  const submit = form.querySelector('button[type="submit"]');
-  const progress = document.querySelector('#generation-status');
-  submit.disabled = true;
-  submit.textContent = 'Generating scenarios…';
-  progress.textContent = 'Reading the selected document and creating the draft. This can take a minute.';
+  if (generation) return;
+  const values = Object.fromEntries(generationFields.map(id => [id, document.querySelector(`#${id}`).value]));
+  const cancel = new AbortController();
+  generation = { cancel, values, count: Number(values['dataset-count']) || 10, answered: false };
+  showGenerationProgress();
   try {
     const response = await fetch('/api/datasets/generate', {
       method: 'POST',
+      signal: cancel.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        documentId: document.querySelector('#dataset-document').value,
-        connectionId: document.querySelector('#dataset-control').value,
-        count: document.querySelector('#dataset-count').value,
-        declineShare: document.querySelector('#dataset-decline-share').value,
+        documentId: values['dataset-document'],
+        connectionId: values['dataset-control'],
+        count: values['dataset-count'],
+        declineShare: values['dataset-decline-share'],
       }),
     });
+    // The server has answered, so the draft may already be saved: too late to cancel.
+    generation.answered = true;
+    const cancelButton = document.querySelector('.js-cancel-generation');
+    if (cancelButton) cancelButton.disabled = true;
     const body = await response.json();
     if (!response.ok) throw new Error(body.error);
+    generation = null;
     workspace.datasets.push(body);
     reviewingDatasetId = body.id;
-    render('datasets');
-    toast('Draft generated. Review the scenarios before approving.');
+    if ((location.hash.slice(1).split(':')[0] || 'home') === 'datasets') {
+      render('datasets');
+      toast('Draft generated. Review the scenarios before approving.');
+    } else toast('Draft ready in Golden datasets. Review the scenarios before approving.');
   } catch (error) {
-    submit.disabled = false;
-    submit.textContent = 'Generate draft scenarios';
-    progress.textContent = error.message || 'Dataset generation failed. Please try again.';
-    progress.setAttribute('role', 'alert');
-    toast(progress.textContent);
+    generation = null;
+    if (error.name === 'AbortError') {
+      hideGenerationProgress('Generation cancelled. Nothing was saved.')?.classList.add('is-cancelled');
+      return;
+    }
+    const message = error.message || 'Dataset generation failed. Please try again.';
+    hideGenerationProgress(message)?.setAttribute('role', 'alert');
+    toast(message);
   }
 }
 
