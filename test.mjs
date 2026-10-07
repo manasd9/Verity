@@ -2749,6 +2749,187 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
   const changed = sources.map(source => source.replaceAll('Golden datasets', 'Benchmarks'));
   assert.ok(compareRenders(sources, changed, empty).differences.length > 0, 'a one-word change is caught');
 }
+// Usage page: tokens and cost per document, grouped by upload, draft and run, with the calculation shown.
+{
+  const helpers = topLevel(js, 'HTML_ESCAPES', 'escapeHtml');
+  const usageCode = topLevel(
+    js,
+    'usageCost',
+    'usageMoney',
+    'usageFormula',
+    'usageCategory',
+    'usageByDocument',
+    'USAGE_CATEGORY_LABELS',
+    'usageCard',
+  );
+  const { usageCost, usageMoney, usageFormula, usageByDocument, usageCard } = new Function(
+    `${helpers}\n${usageCode}; return { usageCost, usageMoney, usageFormula, usageByDocument, usageCard };`,
+  )();
+  const prices = { 'gpt-5.6-terra': { input: 2, output: 12 }, 'text-embedding-3-small': { input: 0.02, output: 0 } };
+  const entry = fields => ({
+    model: 'gpt-5.6-terra',
+    calls: 1,
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    ...fields,
+  });
+  const rubric = entry({
+    at: '2026-10-07T10:13:00Z',
+    step: 'Rubric check',
+    sourceId: 'doc_h',
+    sourceName: 'Harbor <manual>.docx',
+    sourceKind: 'policy',
+    datasetId: 'ds_1',
+    inputTokens: 4812,
+    outputTokens: 3955,
+    reasoningTokens: 2910,
+  });
+  assert.equal(usageCost(rubric, prices).toFixed(6), ((4812 * 2) / 1e6 + (3955 * 12) / 1e6).toFixed(6));
+  assert.equal(usageCost(entry({ model: 'unknown' }), prices), null, 'no price, no guessed cost');
+  assert.equal(usageMoney(0.05746), '$0.057');
+  assert.equal(usageMoney(0.00008), '$0.0001');
+  assert.equal(usageMoney(1.234), '$1.23');
+  assert.equal(usageMoney(null), 'no price');
+  assert.equal(usageFormula(rubric, prices), '4,812 in × $2/M + 3,955 out × $12/M (2,910 reasoning) = ');
+  assert.equal(
+    usageFormula(entry({ model: 'text-embedding-3-small', inputTokens: 4120 }), prices),
+    '4,120 in × $0.02/M = ',
+  );
+  assert.match(
+    usageFormula(entry({ model: 'unknown', inputTokens: 5 }), prices),
+    /set a price for unknown in Settings/,
+  );
+  const usage = [
+    entry({
+      at: '2026-09-30T10:02:00Z',
+      step: 'Indexing',
+      model: 'text-embedding-3-small',
+      sourceId: 'doc_h',
+      sourceName: 'Harbor <manual>.docx',
+      sourceKind: 'policy',
+      inputTokens: 4120,
+    }),
+    entry({
+      at: '2026-10-07T10:12:00Z',
+      step: 'Normal questions',
+      sourceId: 'doc_h',
+      sourceName: 'Harbor <manual>.docx',
+      sourceKind: 'policy',
+      datasetId: 'ds_1',
+      inputTokens: 4150,
+      outputTokens: 3820,
+    }),
+    rubric,
+    entry({
+      at: '2026-10-07T11:40:00Z',
+      step: 'Re-check rubric',
+      sourceId: 'doc_h',
+      sourceName: 'Harbor <manual>.docx',
+      sourceKind: 'policy',
+      datasetId: 'ds_1',
+      inputTokens: 4790,
+      outputTokens: 4310,
+    }),
+    entry({
+      at: '2026-10-07T12:05:00Z',
+      step: 'Judge',
+      calls: 10,
+      sourceId: 'doc_h',
+      sourceName: 'Harbor <manual>.docx',
+      sourceKind: 'policy',
+      datasetId: 'ds_1',
+      evaluationId: 'ev_1',
+      agentName: 'Marina',
+      inputTokens: 9800,
+      outputTokens: 26400,
+    }),
+    entry({ at: '2026-10-06T16:46:00Z', step: 'Check model', calls: 3, inputTokens: 60, outputTokens: 1500 }),
+    entry({
+      at: '2026-10-07T13:00:00Z',
+      step: 'Indexing',
+      model: 'text-embedding-3-small',
+      sourceId: 'snap_2',
+      websiteId: 'site_1',
+      sourceName: 'hotel.example',
+      sourceKind: 'website',
+      inputTokens: 900,
+    }),
+    entry({
+      at: '2026-10-08T09:00:00Z',
+      step: 'Indexing',
+      model: 'text-embedding-3-small',
+      sourceId: 'snap_3',
+      websiteId: 'site_1',
+      sourceName: 'hotel.example',
+      sourceKind: 'website',
+      inputTokens: 950,
+    }),
+  ];
+  const documents = usageByDocument(usage, prices, [{ id: 'ds_1', cases: [{}, {}, {}] }], []);
+  assert.deepEqual(
+    documents.map(document => document.name),
+    ['Harbor <manual>.docx', 'hotel.example', 'Not tied to a document'],
+    'most expensive first; checks without a source last',
+  );
+  const harbor = documents[0];
+  assert.deepEqual(
+    harbor.groups.map(group => group.title),
+    [
+      'Evaluation run · 7 Oct, 13:05 · Marina'.replace(
+        '13:05',
+        new Date('2026-10-07T12:05:00Z').toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+      ),
+      'Draft · 3 scenarios',
+      'Upload and indexing',
+    ],
+  );
+  assert.deepEqual(
+    harbor.groups[1].entries.map(item => item.step),
+    ['Normal questions', 'Rubric check', 'Re-check rubric'],
+    're-checks sit under their draft, oldest first',
+  );
+  assert.equal(harbor.cost.toFixed(6), harbor.groups.reduce((sum, group) => sum + group.cost, 0).toFixed(6));
+  assert.deepEqual(
+    harbor.split.map(part => part.category),
+    ['drafts', 'runs', 'indexing', 'other'],
+  );
+  assert.equal(documents[1].groups[0].entries.length, 2, 'every crawl of a website counts toward that website');
+  assert.equal(
+    usageByDocument(usage, prices, [], [])[0].groups.find(group => group.title.startsWith('Draft')).title,
+    'Draft (removed)',
+  );
+  const card = usageCard(harbor, prices);
+  assert.match(
+    card,
+    /<span class="eyebrow">DOCUMENT<\/span><h3>Harbor &lt;manual&gt;\.docx<\/h3>/,
+    'names are escaped',
+  );
+  assert.match(
+    card,
+    /<div class="usage-bar"><span class="usage-bar-drafts" style="width: [\d.]+%"><\/span><span class="usage-bar-runs"/,
+  );
+  assert.match(
+    card,
+    /<span>Rubric check<\/span>.*4,812 in × \$2\/M \+ 3,955 out × \$12\/M \(2,910 reasoning\) = <b>\$0\.057<\/b>/,
+  );
+  assert.match(card, /<summary>Show every step<\/summary>/);
+  // Wiring: the page, its sidebar link, the Settings tab and the motion gate.
+  assert.match(
+    js,
+    /const pages = \{ home, evaluation, documents, technical, datasets, chat, results, usage, settings \};/,
+  );
+  assert.match(js, /scopedPages = new Set\(\[[^\]]*'usage'\]\)/);
+  assert.match(html, /<a href="#usage" class="nav-link" data-page="usage">/);
+  assert.match(js, /\['prices', 'Usage prices', true, 'Cost per million tokens'\]/);
+  assert.match(
+    js,
+    /querySelectorAll\('\.js-price-form'\)\.forEach\(form => form\.addEventListener\('submit', savePrice\)\)/,
+  );
+  assert.match(js, /settingsTab = 'prices';\s*location\.hash = 'settings';/);
+  assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.usage-card/);
+  assert.doesNotMatch(css.replace(/@media \(prefers-reduced-motion: no-preference\) \{.*\n/g, ''), /animation: usage-/);
+}
 // Version: which code is running, and which code scored each run.
 {
   const { verityVersion } = require('./server.js');
@@ -2795,6 +2976,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
 const listener = createServer(app);
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const originalFetch = globalThis.fetch;
+const mockUsage = { prompt_tokens: 1000, completion_tokens: 400, completion_tokens_details: { reasoning_tokens: 150 } };
 try {
   const remoteCalls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -2834,7 +3016,7 @@ try {
     if (String(url).endsWith('/chat/completions')) {
       const system = JSON.parse(options.body).messages[0].content;
       const reply = value =>
-        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }), {
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }], usage: mockUsage }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -2903,6 +3085,7 @@ try {
               },
             },
           ],
+          usage: mockUsage,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -3231,6 +3414,51 @@ try {
   );
   assert.equal(rubricRechecked.body.rubricCheck.cases[0].points[0].kept, true, 'a Keep choice survives a re-check');
   assert.equal((await requestApp(listener, 'POST', '/api/datasets/no-such-dataset/recheck-rubric')).status, 404);
+  const usageState = (await requestApp(listener, 'GET', '/api/state')).body;
+  const draftUsage = usageState.usage.filter(entry => entry.datasetId === mixed.body.id);
+  assert.deepEqual(
+    [...new Set(draftUsage.map(entry => entry.step))].sort(),
+    ['Answered elsewhere check', 'Normal questions', 'Re-check rubric', 'Rubric check', '“Should decline” questions'],
+    'every token-using step of a draft is recorded, including re-checks',
+  );
+  const normal = draftUsage.find(entry => entry.step === 'Normal questions');
+  assert.deepEqual(
+    {
+      calls: normal.calls,
+      inputTokens: normal.inputTokens,
+      outputTokens: normal.outputTokens,
+      reasoningTokens: normal.reasoningTokens,
+      model: normal.model,
+    },
+    { calls: 1, inputTokens: 1000, outputTokens: 400, reasoningTokens: 150, model: 'test-model' },
+  );
+  assert.equal(normal.sourceId, scopedDocument.body.id);
+  assert.equal(normal.sourceKind, 'policy');
+  assert.equal(normal.agentId, '65f000000000000000000002', 'usage carries the workspace scope');
+  await requestApp(listener, 'POST', `/api/datasets/${mixed.body.id}/recheck-rubric`);
+  const recheckRecords = (await requestApp(listener, 'GET', '/api/state')).body.usage.filter(
+    entry => entry.datasetId === mixed.body.id && entry.step === 'Re-check rubric',
+  );
+  assert.equal(recheckRecords.length, 2, 'each re-check is its own record');
+  assert.ok(
+    usageState.usage.some(entry => entry.step === 'Check model' && !entry.sourceId),
+    'model checks are recorded without a source',
+  );
+  assert.deepEqual(usageState.usagePrices['gpt-5.6-terra'], { input: 2, output: 12 });
+  const priced = await requestApp(listener, 'PUT', '/api/usage-prices', {
+    model: 'test-model',
+    input: '1.5',
+    output: 6,
+  });
+  assert.equal(priced.status, 200);
+  assert.deepEqual(priced.body['test-model'], { input: 1.5, output: 6 });
+  for (const bad of [
+    { model: '', input: 1, output: 1 },
+    { model: 'm', input: -1, output: 1 },
+    { model: 'm', input: 'x', output: 1 },
+    { model: 'm', input: 1 },
+  ])
+    assert.equal((await requestApp(listener, 'PUT', '/api/usage-prices', bad)).status, 400);
   assert.ok(savedMixed.body.coverage);
   assert.equal(
     savedMixed.body.cases.find(item => item.caseType === 'decline').declineKind,
@@ -3249,6 +3477,14 @@ try {
     ),
   });
   assert.equal(mixedRun.status, 201);
+  const runUsage = (await requestApp(listener, 'GET', '/api/state')).body.usage.filter(
+    entry => entry.evaluationId === mixedRun.body.id,
+  );
+  assert.deepEqual(
+    runUsage.map(entry => [entry.step, entry.calls, entry.datasetId]),
+    [['Judge', mixedRun.body.results.length, mixed.body.id]],
+    'one Judge record per run, counting its calls',
+  );
   assert.equal(
     mixedRun.body.results.find(item => item.case.caseType === 'decline').answerMayBeIncomplete,
     undefined,

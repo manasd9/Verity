@@ -675,6 +675,38 @@ a { color: inherit; text-decoration: none; }
 }
 @media (max-width: 560px) { .workspace-scope-slash { display: none; } }
 
+/* Usage: one card per document, with the workspace total in the dark panel. */
+.usage-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 22px; align-items: start; }
+.usage-cards { display: grid; gap: 14px; }
+.usage-card header { display: flex; justify-content: space-between; gap: 12px; }
+.usage-card h3 { margin: 2px 0 10px; font-size: 14px; overflow-wrap: anywhere; }
+.usage-card header strong { font-size: 20px; white-space: nowrap; }
+.usage-bar { display: flex; height: 10px; border-radius: 99px; overflow: hidden; background: var(--soft); }
+.usage-bar-drafts { background: var(--accent); }.usage-bar-runs { background: var(--green); }.usage-bar-indexing { background: var(--gold); }.usage-bar-other { background: var(--muted); }
+.usage-legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0; font-size: 11px; color: var(--muted); }
+.usage-legend i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 2px; }
+.usage-card details summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--accent-dark); }
+.usage-group { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.usage-group h4 { display: flex; justify-content: space-between; margin: 0 0 6px; color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+.usage-group h4 span { color: var(--ink); }
+.usage-group ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.usage-group li { display: grid; grid-template-columns: minmax(150px, .9fr) minmax(0, 1.4fr); gap: 12px; padding: 8px 10px; border-radius: 8px; background: var(--canvas); font-size: 12px; }
+.usage-step span { display: block; font-weight: 700; }.usage-step small { color: var(--muted); }
+.usage-formula { color: var(--muted); font-variant-numeric: tabular-nums; }.usage-formula b { color: var(--ink); }
+.usage-side { position: sticky; top: 24px; display: grid; gap: 14px; padding: 20px; border-radius: var(--radius); background: #17343b; color: #eff7f4; }
+.usage-side h2 { margin: 0; font-size: 16px; }.usage-side > div > p { margin: 4px 0 0; color: #c7d8d4; font-size: 12px; line-height: 1.5; }
+.usage-total { font-size: 32px; font-weight: 800; }.usage-total small { display: block; color: #c7d8d4; font-size: 11px; font-weight: 500; }
+.usage-split { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 12px; }.usage-split li { display: flex; justify-content: space-between; gap: 10px; }.usage-split span { color: #c7d8d4; }
+.usage-prices h3 { margin: 0 0 4px; font-size: 12px; }.usage-prices p, .usage-note { margin: 2px 0; color: #c7d8d4; font-size: 11px; line-height: 1.5; }
+.usage-empty { display: grid; gap: 4px; }
+.usage-price-list { display: grid; gap: 8px; }
+.usage-price-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px 110px auto; gap: 10px; align-items: end; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.usage-price-row strong { align-self: center; font-size: 13px; overflow-wrap: anywhere; }
+.usage-price-row label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.usage-price-row input { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+@media (max-width: 1100px) { .usage-layout { grid-template-columns: 1fr; }.usage-side { position: static; } }
+@media (max-width: 640px) { .usage-group li { grid-template-columns: 1fr; }.usage-price-row { grid-template-columns: 1fr 1fr; }.usage-price-row strong { grid-column: 1 / -1; } }
+@media (prefers-reduced-motion: no-preference) { .usage-card, .usage-empty { animation: usage-rise .45s cubic-bezier(.16, 1, .3, 1) both; transition: transform .18s ease; }.usage-card:hover { transform: translateY(-2px); } @keyframes usage-rise { from { opacity: 0; transform: translateY(8px); } } }
 /* Results: scenario list + one result at a time (presentation only) */
 .result-layout { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 20px; align-items: start; margin-top: 16px; }
 .result-layout [hidden] { display: none !important; }

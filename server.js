@@ -65,6 +65,71 @@ function verityVersion() {
   return { ...SERVER_VERSION, pageUpdatedAt: new Date(pageUpdatedAt).toISOString() };
 }
 
+// Token usage. Routes that spend tokens run inside a meter (see the middleware below); callModel, embed and the
+// model check record each reply's real usage under a step name, and the meter saves the totals just before the
+// response is sent. Customer chat is not metered.
+const { AsyncLocalStorage } = require('node:async_hooks');
+const usageContext = new AsyncLocalStorage();
+const DEFAULT_PRICES = {
+  'gpt-5.6-terra': { input: 2, output: 12 },
+  'text-embedding-3-small': { input: 0.02, output: 0 },
+};
+function recordUsage(kind, model, usage, step) {
+  const meter = usageContext.getStore();
+  if (!meter || !usage) return;
+  meter.entries.push({
+    step: step || meter.defaults[kind],
+    model,
+    inputTokens: Number(usage.prompt_tokens) || 0,
+    outputTokens: Number(usage.completion_tokens) || 0,
+    reasoningTokens: Number(usage.completion_tokens_details?.reasoning_tokens) || 0,
+  });
+}
+// What the metered action belongs to (source, draft, run). Applied when the totals are saved, so it can be set late.
+function usageAbout(fields) {
+  const meter = usageContext.getStore();
+  if (meter) Object.assign(meter.about, fields);
+}
+function saveUsage(meter) {
+  if (!meter.entries.length) return;
+  const merged = new Map();
+  for (const entry of meter.entries) {
+    const key = `${entry.step}|${entry.model}`;
+    const total = merged.get(key) || {
+      step: entry.step,
+      model: entry.model,
+      calls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    };
+    total.calls += 1;
+    total.inputTokens += entry.inputTokens;
+    total.outputTokens += entry.outputTokens;
+    total.reasoningTokens += entry.reasoningTokens;
+    merged.set(key, total);
+  }
+  const at = new Date().toISOString();
+  const store = readStore();
+  store.usage.push(...[...merged.values()].map(total => ({ id: id('usage'), at, ...meter.about, ...total })));
+  saveStore(store);
+}
+// Tags usage with a dataset's source (and any extra fields such as the run).
+function usageAboutDataset(store, dataset, extra = {}) {
+  const source = resolveDocument(store, dataset.documentId);
+  usageAbout({
+    sourceId: dataset.documentId,
+    sourceName: source?.name || dataset.documentId,
+    sourceKind: source?.kind || dataset.documentKind,
+    ...(source?.websiteId ? { websiteId: source.websiteId } : {}),
+    ...recordScope(dataset),
+    datasetId: dataset.id,
+    ...extra,
+  });
+}
+function usagePrices(store) {
+  return { ...DEFAULT_PRICES, ...(store.usagePrices || {}) };
+}
 function readStore() {
   const empty = {
     documents: [],
@@ -79,6 +144,8 @@ function readStore() {
     chats: [],
     agentConfigs: [],
     flexAgentSession: null,
+    usage: [],
+    usagePrices: {},
   };
   if (!fs.existsSync(storePath)) return empty;
   const store = { ...empty, ...JSON.parse(fs.readFileSync(storePath, 'utf8')) };
@@ -259,7 +326,10 @@ async function checkJudgeSupport(connection) {
         ...extra,
       }),
     });
-    if (response.ok) return true;
+    if (response.ok) {
+      recordUsage('chat', connection.model, (await response.json().catch(() => null))?.usage, 'Check model');
+      return true;
+    }
     const error = await response.text();
     if (!required && [400, 422].includes(response.status)) return false;
     throw new Error(`The model check failed: ${response.status} ${error.slice(0, 300)}`);
@@ -546,7 +616,7 @@ function rubricPass(verdict) {
 }
 async function scoreAnswer(control, answer, rubric) {
   const messages = scoringMessages(answer, rubric);
-  const judged = parseScoredVerdict(await callModel(control, messages, true, { judge: true }));
+  const judged = parseScoredVerdict(await callModel(control, messages, true, { judge: true, step: 'Judge' }));
   const verdict = { ...judged, pass: rubricPass(judged), judgePass: judged.pass };
   return { ...verdict, ...(!verdict.pass ? { gapDiagnosis: gapDiagnosisForVerdict(verdict, rubric) } : {}) };
 }
@@ -574,7 +644,7 @@ async function extractText(file) {
   if (extension === '.txt') return file.buffer.toString('utf8');
   throw new Error('Only PDF, DOCX, and TXT files are supported.');
 }
-async function callModel(connection, messages, json = false, { judge = false, signal } = {}) {
+async function callModel(connection, messages, json = false, { judge = false, signal, step } = {}) {
   const base = connection.baseUrl.replace(/\/$/, '');
   if (judge && !connection.judgeSupport) saveJudgeSupport(connection, await checkJudgeSupport(connection)); // Connections added before the check existed.
   const send = () =>
@@ -602,6 +672,7 @@ async function callModel(connection, messages, json = false, { judge = false, si
   }
   if (!response.ok) throw new Error(`Model request failed: ${response.status} ${await response.text()}`);
   const body = await response.json();
+  recordUsage('chat', connection.model, body.usage, step);
   return body.choices?.[0]?.message?.content || '';
 }
 function parseSurveyFacts(raw) {
@@ -683,7 +754,7 @@ async function extractSurveyFacts(control, chat) {
       },
     ],
     true,
-    { judge: true },
+    { judge: true, step: 'Memory extraction' },
   );
   return parseSurveyFacts(raw);
 }
@@ -956,7 +1027,7 @@ function removeWebsiteData(store, websiteId) {
 function openAIControlConnection(store) {
   return store.connections.find(item => item.role === 'control' && new URL(item.baseUrl).hostname === 'api.openai.com');
 }
-async function embed(connection, input) {
+async function embed(connection, input, step) {
   const response = await safeFetch(`${connection.baseUrl.replace(/\/$/, '')}/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${decrypt(connection.secret)}` },
@@ -964,12 +1035,13 @@ async function embed(connection, input) {
   });
   if (!response.ok) throw new Error(`Embedding request failed: ${response.status} ${await response.text()}`);
   const body = await response.json();
+  recordUsage('embed', 'text-embedding-3-small', body.usage, step);
   return body.data.map(item => item.embedding);
 }
-async function embedAll(connection, input) {
+async function embedAll(connection, input, step) {
   const vectors = [];
   for (let index = 0; index < input.length; index += 100)
-    vectors.push(...(await embed(connection, input.slice(index, index + 100))));
+    vectors.push(...(await embed(connection, input.slice(index, index + 100), step)));
   return vectors;
 }
 async function ensureTechnicalIndexed(store, document, control) {
@@ -978,6 +1050,7 @@ async function ensureTechnicalIndexed(store, document, control) {
   const vectors = await embedAll(
     control,
     chunks.map(chunk => chunk.text),
+    'Indexing',
   );
   if (!chunks.length || vectors.length !== chunks.length)
     throw new Error('Technical document indexing did not complete. Please try again.');
@@ -1247,6 +1320,7 @@ async function checkDeclineCases(store, source, control, cases, signal) {
       questionVectors = await embed(
         control,
         cases.map(item => item.question),
+        'Answered elsewhere check',
       );
     } catch {
       questionVectors = [];
@@ -1275,7 +1349,7 @@ async function checkDeclineCases(store, source, control, cases, signal) {
       },
     ],
     true,
-    { signal },
+    { signal, step: 'Answered elsewhere check' },
   );
   const results = JSON.parse(raw).results;
   if (!Array.isArray(results)) throw new Error('The control model did not return a check result.');
@@ -1441,6 +1515,32 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 app.use(localRequestGuard);
 app.use(express.json({ limit: '1mb' }));
+const METERED_ROUTES = [
+  [
+    /^\/api\/(documents|technical-documents|websites)(\/|$)/,
+    { chat: 'Technical Blueprint analysis', embed: 'Indexing' },
+  ],
+  [/^\/api\/datasets\/generate$/, { chat: 'Normal questions', embed: 'Answered elsewhere check' }],
+  [/^\/api\/datasets\/[^/]+\/recheck-rubric$/, { chat: 'Re-check rubric', embed: 'Re-check rubric' }],
+  [/^\/api\/evaluations(\/|$)/, { chat: 'Agent answers', embed: 'Retrieval search' }],
+  [/^\/api\/(connections|openai-setup)(\/|$)/, { chat: 'Check model', embed: 'Check model' }],
+];
+app.use((req, res, next) => {
+  const route = req.method === 'POST' && METERED_ROUTES.find(([pattern]) => pattern.test(req.path));
+  if (!route) return next();
+  const meter = { defaults: route[1], about: {}, entries: [] };
+  const end = res.end;
+  res.end = function (...args) {
+    res.end = end;
+    try {
+      saveUsage(meter);
+    } catch (error) {
+      console.error('Usage could not be saved:', error.message);
+    }
+    return end.apply(this, args);
+  };
+  usageContext.run(meter, next);
+});
 app.get('/vendor/livekit-client.js', (req, res) =>
   res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')),
 );
@@ -1459,6 +1559,8 @@ app.get('/api/state', (req, res) => {
   const store = readStore();
   res.json({
     version: verityVersion(),
+    usage: store.usage,
+    usagePrices: usagePrices(store),
     documents: store.documents.map(document => publicDocument(document, store.chunks)),
     technicalDocuments: store.technicalDocuments.map(({ text, ...document }) => ({
       ...document,
@@ -1827,6 +1929,7 @@ app.post('/api/documents', upload.single('document'), async (req, res, next) => 
       ...requestedScope(initialStore, req.body),
       createdAt: new Date().toISOString(),
     };
+    usageAbout({ sourceId: document.id, sourceName: document.name, sourceKind: 'policy', ...recordScope(document) });
     const control = openAIControlConnection(initialStore);
     const chunks = chunkText(text);
     let indexed = [];
@@ -1883,6 +1986,7 @@ app.post('/api/technical-documents', upload.single('document'), async (req, res,
       createdAt: new Date().toISOString(),
       analysisStatus: 'unavailable',
     };
+    usageAbout({ sourceId: document.id, sourceName: document.name, sourceKind: 'technical', ...recordScope(document) });
     store.technicalDocuments.push(document);
     saveStore(store);
     const control = openAIControlConnection(store);
@@ -1980,6 +2084,13 @@ app.post('/api/websites', async (req, res, next) => {
       createdAt: new Date().toISOString(),
     };
     const { snapshot, chunks } = await createWebsiteSnapshot(openAIControlConnection(readStore()), website, rootUrl);
+    usageAbout({
+      sourceId: snapshot.id,
+      websiteId: website.id,
+      sourceName: snapshot.name,
+      sourceKind: 'website',
+      ...recordScope(website),
+    });
     const store = readStore();
     store.websites.push(website);
     store.websiteSnapshots.push(snapshot);
@@ -2001,6 +2112,13 @@ app.post('/api/websites/:id/recrawl', async (req, res, next) => {
       website,
       website.rootUrl,
     );
+    usageAbout({
+      sourceId: snapshot.id,
+      websiteId: website.id,
+      sourceName: snapshot.name,
+      sourceKind: 'website',
+      ...recordScope(website),
+    });
     const store = readStore();
     if (!store.websites.some(item => item.id === website.id)) throw new Error('Website source not found.');
     store.websiteSnapshots.push(snapshot);
@@ -2111,6 +2229,13 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     if (recordScope(document)) requestedScope(store, document);
     const technical = document.kind === 'technical';
     const website = document.kind === 'website';
+    usageAbout({
+      sourceId: document.id,
+      sourceName: document.name,
+      sourceKind: document.kind,
+      ...(document.websiteId ? { websiteId: document.websiteId } : {}),
+      ...recordScope(document),
+    });
     const caseType = website
       ? 'website knowledge-base evaluation cases'
       : technical
@@ -2134,7 +2259,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       throw new Error('The control model did not cite any valid source passages. Please try again.');
     const rubricEntries = rubricCheckEntries(answerCases, sources);
     const rubricCheckRun = rubricEntries.length
-      ? callModel(connection, rubricCheckMessages(rubricEntries), true, { signal })
+      ? callModel(connection, rubricCheckMessages(rubricEntries), true, { signal, step: 'Rubric check' })
           .then(raw => ({ checkedAt: new Date().toISOString(), cases: applyRubricCheck(rubricEntries, raw) }))
           .catch(error => ({ error: error.message }))
       : Promise.resolve(undefined);
@@ -2143,7 +2268,10 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     if (declineCount) {
       try {
         const generated = declineCases(
-          await callModel(connection, declineGenerationMessages(declineCount, sources), true, { signal }),
+          await callModel(connection, declineGenerationMessages(declineCount, sources), true, {
+            signal,
+            step: '“Should decline” questions',
+          }),
           sources,
         ).slice(0, declineCount);
         const checked = await checkDeclineCases(store, document, connection, generated, signal);
@@ -2174,6 +2302,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       ...(rubricCheck ? { rubricCheck } : {}),
       createdAt: new Date().toISOString(),
     };
+    usageAbout({ datasetId: dataset.id });
     const latest = readStore();
     const latestSource = resolveDocument(latest, documentId);
     if (!latestSource || !sameScope(latestSource, document))
@@ -2209,6 +2338,19 @@ app.put('/api/datasets/:id', (req, res) => {
 });
 // Re-runs the rubric check on a draft's saved scenarios (the page saves the review first). Keep choices carry
 // over for points that did not change.
+// Prices per million tokens, per model, for the Usage page's cost estimates.
+app.put('/api/usage-prices', (req, res) => {
+  const { model, input, output } = req.body;
+  const price = value => (value === '' || value === undefined ? NaN : Number(value));
+  if (typeof model !== 'string' || !model.trim() || model.length > 200)
+    return res.status(400).json({ error: 'Choose a model.' });
+  if (![price(input), price(output)].every(value => Number.isFinite(value) && value >= 0 && value <= 10000))
+    return res.status(400).json({ error: 'Prices must be numbers from 0 to 10,000 dollars per million tokens.' });
+  const store = readStore();
+  store.usagePrices = { ...store.usagePrices, [model.trim()]: { input: price(input), output: price(output) } };
+  saveStore(store);
+  res.json(usagePrices(store));
+});
 app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
   try {
     const store = readStore();
@@ -2220,6 +2362,7 @@ app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
     if (!source) return res.status(400).json({ error: 'The source for this dataset is unavailable.' });
     const control = store.connections.find(item => item.role === 'control');
     if (!control) return res.status(400).json({ error: 'Connect a control model in Settings first.' });
+    usageAboutDataset(store, dataset);
     const sources = source.kind === 'website' ? sourcePassages(source).slice(0, 120) : sourcePassages(source);
     const entries = rubricCheckEntries(dataset.cases, sources);
     let rubricCheck;
@@ -2287,6 +2430,7 @@ app.post('/api/evaluations', async (req, res, next) => {
     if (!dataset || !target || !control || !document)
       throw new Error('An approved dataset, its document, target agent, and control model are required.');
     if (!sameScope(dataset, document)) throw new Error('The dataset belongs to a different source or agent.');
+    usageAboutDataset(store, dataset, { agentName: target.name });
     if (target.kind === 'flexagent-livekit' || recordScope(dataset))
       throw new Error('Use the selected agent’s LiveKit evaluation for this benchmark.');
     if (document.kind === 'technical' && target.kind === 'flexagent')
@@ -2427,6 +2571,7 @@ app.post('/api/evaluations', async (req, res, next) => {
       results,
       ...evaluationScores(results),
     };
+    usageAbout({ evaluationId: evaluation.id });
     const latest = readStore();
     latest.evaluations.unshift(evaluation);
     saveStore(latest);
@@ -2442,6 +2587,7 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
     const dataset = store.datasets.find(item => item.id === datasetId && item.status === 'approved');
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !control) throw new Error('An approved dataset and control model are required.');
+    usageAboutDataset(store, dataset, { agentName: 'Pasted answers' });
     if (recordScope(dataset)) requestedScope(store, dataset);
     if (
       !Array.isArray(answers) ||
@@ -2470,6 +2616,7 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
       results,
       ...evaluationScores(results),
     };
+    usageAbout({ evaluationId: evaluation.id });
     const latest = readStore();
     latest.evaluations.unshift(evaluation);
     saveStore(latest);
@@ -2499,6 +2646,7 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !target || !control)
       throw new Error('An approved dataset, LiveKit FlexAgent target, and control model are required.');
+    usageAboutDataset(store, dataset, { agentName: dataset.agentName || target.name });
     if (!sameScope(dataset, target) || !sameScope(dataset, resolveDocument(store, dataset.documentId)))
       throw new Error('The approved dataset does not belong to this FlexAgent.');
     requestedScope(store, target);
@@ -2540,6 +2688,7 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
       results,
       ...evaluationScores(results),
     };
+    usageAbout({ evaluationId: evaluation.id });
     const latest = readStore();
     latest.evaluations.unshift(evaluation);
     saveStore(latest);
@@ -2622,4 +2771,6 @@ module.exports = {
   applyRubricCheck,
   keepRubricCheck,
   markKeptRubricPoints,
+  usagePrices,
+  DEFAULT_PRICES,
 };

@@ -819,12 +819,13 @@ function settings() {
       Boolean(connections),
       'Agents and grader in use',
     ],
+    ['prices', 'Usage prices', true, 'Cost per million tokens'],
   ].filter(([, , available]) => available);
   const activeTab = tabs.some(([key]) => key === settingsTab) ? settingsTab : 'openai';
   const panel = (key, content) =>
     `<section id="settings-panel-${key}" class="panel card-pad settings-card" role="tabpanel" aria-labelledby="settings-tab-${key}" ${key === activeTab ? '' : 'hidden'}>${content}</section>`;
   const tabList = `<div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">${tabs.map(([key, name, , description]) => `<button id="settings-tab-${key}" class="settings-tab js-settings-tab" data-tab="${key}" type="button" role="tab" aria-controls="settings-panel-${key}" aria-selected="${key === activeTab}" tabindex="${key === activeTab ? 0 : -1}"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(description)}</small></button>`).join('')}</div>`;
-  return `${header('Settings', 'Connect OpenAI once, then choose the models used for your customer agent and evaluation.')}<div class="settings-layout">${tabList}<div class="settings-stack">${panel('openai', `<h2 class="minor-title">Connect OpenAI</h2><p class="settings-intro">One key, two jobs: the target model answers customers, and the control model writes golden datasets, grades answers, and powers source search.</p><form id="openai-form" class="form-grid"><div class="field full"><label for="openai-key">OpenAI API key</label><input id="openai-key" required type="password" autocomplete="off" placeholder="Paste your OpenAI API key" /><span class="help">It is encrypted by the server and never shown again.</span></div><div class="field"><label for="target-model">Target model</label><input id="target-model" required value="gpt-5.6-luna" placeholder="Model that answers customers" /></div><div class="field"><label for="control-model">Control model</label><input id="control-model" required value="gpt-5.6-terra" placeholder="Model that creates and judges datasets" /></div><div class="field full form-actions"><button class="button button-primary" type="submit">Save OpenAI setup</button><span class="help">Saving replaces the existing OpenAI setup. A model request will confirm that your account has available API credits.</span></div></form>`)}${panel('flexagent', flexAgentForm)}${promptForm ? panel('instructions', `<h2 class="minor-title">Agent instructions</h2><p class="settings-intro">Only used when this policy document is selected in customer chat or evaluation.</p>${promptForm}`) : ''}${connections ? panel('models', `<h2 class="minor-title">Connected models</h2><p class="settings-intro">The agents Verity can test, and the model that grades their answers.</p>${connections}`) : ''}</div></div>`;
+  return `${header('Settings', 'Connect OpenAI once, then choose the models used for your customer agent and evaluation.')}<div class="settings-layout">${tabList}<div class="settings-stack">${panel('openai', `<h2 class="minor-title">Connect OpenAI</h2><p class="settings-intro">One key, two jobs: the target model answers customers, and the control model writes golden datasets, grades answers, and powers source search.</p><form id="openai-form" class="form-grid"><div class="field full"><label for="openai-key">OpenAI API key</label><input id="openai-key" required type="password" autocomplete="off" placeholder="Paste your OpenAI API key" /><span class="help">It is encrypted by the server and never shown again.</span></div><div class="field"><label for="target-model">Target model</label><input id="target-model" required value="gpt-5.6-luna" placeholder="Model that answers customers" /></div><div class="field"><label for="control-model">Control model</label><input id="control-model" required value="gpt-5.6-terra" placeholder="Model that creates and judges datasets" /></div><div class="field full form-actions"><button class="button button-primary" type="submit">Save OpenAI setup</button><span class="help">Saving replaces the existing OpenAI setup. A model request will confirm that your account has available API credits.</span></div></form>`)}${panel('flexagent', flexAgentForm)}${promptForm ? panel('instructions', `<h2 class="minor-title">Agent instructions</h2><p class="settings-intro">Only used when this policy document is selected in customer chat or evaluation.</p>${promptForm}`) : ''}${connections ? panel('models', `<h2 class="minor-title">Connected models</h2><p class="settings-intro">The agents Verity can test, and the model that grades their answers.</p>${connections}`) : ''}${panel('prices', usagePricesForm())}</div></div>`;
 }
 
 function datasets() {
@@ -908,13 +909,217 @@ function chat() {
   return `${header('Customer chat', 'Talk to an agent as a customer would, with answers grounded in the source you pick.')}${documents.length && targets.length ? `<div class="chat-shell"><section class="panel chat-window"><div class="chat-title"><span class="connection-role">AI</span><div><strong>${escapeHtml(selectedTarget?.name || 'Agent')}</strong><small>Answers from ${escapeHtml(selectedDocument?.name || 'the selected source')}</small></div></div><div id="chat-messages" class="messages">${messages}</div><form id="customer-chat-form" class="chat-compose"><textarea id="customer-question" required rows="1" placeholder="Ask a question…" aria-label="Message"></textarea><button class="button button-primary" type="submit">Send</button></form></section><aside class="chat-setup"><h2>Chat setup</h2><div class="field"><label for="chat-target">Agent</label><select id="chat-target"><button type="button"><selectedcontent></selectedcontent></button>${targets.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === targetId ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="field"><label for="chat-document">Answers from</label><select id="chat-document"><button type="button"><selectedcontent></selectedcontent></button>${documents.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === documentId ? 'selected' : ''}>${escapeHtml(label(item))}</option>`).join('')}</select></div><button class="button button-secondary js-new-chat" type="button">+ New chat</button><hr /><div class="chat-history"><span class="history-label">Recent chats</span>${history || '<p class="chat-history-empty">No chats yet. Your conversations will appear here.</p>'}</div></aside></div>` : '<section class="panel card-pad"><h2 class="minor-title">Customer chat is not configured yet</h2><p class="page-subtitle">Add a source and a model target in Settings.</p></section>'}`;
 }
 
-const pages = { home, evaluation, documents, technical, datasets, chat, results, settings };
+// Usage: tokens and estimated cost per document, for every step that called a model.
+// Cost is worked out from the prices in Settings when shown, so a corrected price updates every line.
+function usageCost(entry, prices) {
+  const price = prices?.[entry.model];
+  return price ? (entry.inputTokens * price.input + entry.outputTokens * price.output) / 1e6 : null;
+}
+function usageMoney(value) {
+  if (value === null || value === undefined) return 'no price';
+  return '$' + (value < 0.01 ? value.toFixed(4) : value < 1 ? value.toFixed(3) : value.toFixed(2));
+}
+// Plain text; callers escape it.
+function usageFormula(entry, prices) {
+  const price = prices?.[entry.model];
+  const tokens = value => Number(value || 0).toLocaleString('en-US');
+  if (!price)
+    return (
+      tokens(entry.inputTokens) +
+      ' in · ' +
+      tokens(entry.outputTokens) +
+      ' out: set a price for ' +
+      entry.model +
+      ' in Settings'
+    );
+  return (
+    tokens(entry.inputTokens) +
+    ' in × $' +
+    price.input +
+    '/M' +
+    (entry.outputTokens ? ' + ' + tokens(entry.outputTokens) + ' out × $' + price.output + '/M' : '') +
+    (entry.reasoningTokens ? ' (' + tokens(entry.reasoningTokens) + ' reasoning)' : '') +
+    ' = '
+  );
+}
+function usageCategory(entry) {
+  return entry.evaluationId ? 'runs' : entry.datasetId ? 'drafts' : entry.sourceId ? 'indexing' : 'other';
+}
+// Groups the workspace's usage by document, then by upload, draft and run, newest first.
+function usageByDocument(usage, prices, datasets, evaluations) {
+  const sum = entries => entries.reduce((total, entry) => total + (usageCost(entry, prices) ?? 0), 0);
+  const byDocument = new Map();
+  for (const entry of usage) {
+    const key = entry.sourceId ? entry.websiteId || entry.sourceId : 'none';
+    if (!byDocument.has(key)) byDocument.set(key, []);
+    byDocument.get(key).push(entry);
+  }
+  return [...byDocument.entries()]
+    .map(([key, entries]) => {
+      const latest = entries.reduce((a, b) => (a.at > b.at ? a : b));
+      const groups = new Map();
+      for (const entry of entries) {
+        const groupKey = entry.evaluationId
+          ? `run:${entry.evaluationId}`
+          : entry.datasetId
+            ? `draft:${entry.datasetId}`
+            : 'upload';
+        if (!groups.has(groupKey)) groups.set(groupKey, []);
+        groups.get(groupKey).push(entry);
+      }
+      const titled = [...groups.entries()].map(([groupKey, items]) => {
+        const first = items.reduce((a, b) => (a.at < b.at ? a : b));
+        const when = new Date(first.at).toLocaleString('en-GB', {
+          day: 'numeric',
+          month: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        let title = key === 'none' ? 'Model checks' : 'Upload and indexing';
+        if (groupKey.startsWith('draft:')) {
+          const dataset = datasets.find(item => item.id === first.datasetId);
+          title = dataset
+            ? `Draft · ${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'}`
+            : 'Draft (removed)';
+        } else if (groupKey.startsWith('run:')) {
+          const run = evaluations.find(item => item.id === first.evaluationId);
+          title =
+            'Evaluation run · ' +
+            when +
+            (first.agentName || run?.agentName ? ' · ' + (first.agentName || run.agentName) : ''); // Plain text; escaped below.
+        }
+        return { title, at: first.at, cost: sum(items), entries: items.sort((a, b) => a.at.localeCompare(b.at)) };
+      });
+      return {
+        key,
+        name: key === 'none' ? 'Not tied to a document' : latest.sourceName || 'Removed source',
+        kind: key === 'none' ? 'Settings' : latest.sourceKind || 'source',
+        cost: sum(entries),
+        split: ['drafts', 'runs', 'indexing', 'other'].map(category => ({
+          category,
+          cost: sum(entries.filter(entry => usageCategory(entry) === category)),
+        })),
+        groups: titled.sort((a, b) => b.at.localeCompare(a.at)),
+      };
+    })
+    .sort((a, b) => (a.key === 'none') - (b.key === 'none') || b.cost - a.cost);
+}
+const USAGE_CATEGORY_LABELS = {
+  drafts: 'Drafts and rubric checks',
+  runs: 'Evaluation runs',
+  indexing: 'Indexing',
+  other: 'Not tied to a document',
+};
+function usageCard(document, prices) {
+  const kinds = { policy: 'DOCUMENT', technical: 'TECHNICAL', website: 'WEBSITE', Settings: 'SETTINGS' };
+  const parts = document.split.filter(part => part.cost > 0);
+  const bar = parts
+    .map(
+      part =>
+        `<span class="usage-bar-${part.category}" style="width: ${Math.max((part.cost / document.cost) * 100, 1.5).toFixed(1)}%"></span>`,
+    )
+    .join('');
+  const legend = parts
+    .map(
+      part =>
+        `<span><i class="usage-bar-${part.category}"></i>${escapeHtml(USAGE_CATEGORY_LABELS[part.category])} ${escapeHtml(usageMoney(part.cost))}</span>`,
+    )
+    .join('');
+  const groups = document.groups
+    .map(
+      group =>
+        `<div class="usage-group"><h4>${escapeHtml(group.title)}<span>${escapeHtml(usageMoney(group.cost))}</span></h4><ul>${group.entries
+          .map(entry => {
+            const cost = usageCost(entry, prices);
+            const when = new Date(entry.at).toLocaleString('en-GB', {
+              day: 'numeric',
+              month: 'short',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+            return `<li><div class="usage-step"><span>${escapeHtml(entry.step)}</span><small>${escapeHtml(when + ' · ' + entry.model + ' · ' + entry.calls + (entry.calls === 1 ? ' call' : ' calls'))}</small></div><div class="usage-formula">${escapeHtml(usageFormula(entry, prices))}${cost === null ? '' : `<b>${escapeHtml(usageMoney(cost))}</b>`}</div></li>`;
+          })
+          .join('')}</ul></div>`,
+    )
+    .join('');
+  return `<article class="panel card-pad usage-card"><header><div><span class="eyebrow">${escapeHtml(kinds[document.kind] || 'SOURCE')}</span><h3>${escapeHtml(document.name)}</h3></div><strong>${escapeHtml(usageMoney(document.cost))}</strong></header>${bar ? `<div class="usage-bar">${bar}</div><div class="usage-legend">${legend}</div>` : ''}<details><summary>Show every step</summary>${groups}</details></article>`;
+}
+function usage() {
+  const prices = workspace.usagePrices || {};
+  const entries = (workspace.usage || []).filter(inSelectedWorkspace);
+  const documents = usageByDocument(entries, prices, workspace.datasets, workspace.evaluations);
+  const total = documents.reduce((sum, document) => sum + document.cost, 0);
+  const split = ['drafts', 'runs', 'indexing', 'other']
+    .map(category => ({
+      category,
+      cost: documents.reduce((sum, document) => sum + document.split.find(part => part.category === category).cost, 0),
+    }))
+    .filter(part => part.cost > 0);
+  const models = [...new Set(entries.map(entry => entry.model))];
+  const since = entries.length
+    ? new Date(entries.reduce((a, b) => (a.at < b.at ? a : b)).at).toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'short',
+      })
+    : '';
+  const side = `<aside class="usage-side"><div><h2>This workspace</h2><p>Estimated from your prices. Your OpenAI dashboard is the bill of record.</p></div><div class="usage-total">${escapeHtml(usageMoney(total))}<small>${escapeHtml(since ? `since ${since}` : 'Nothing recorded yet')}</small></div>${split.length ? `<ul class="usage-split">${split.map(part => `<li><span>${escapeHtml(USAGE_CATEGORY_LABELS[part.category])}</span><b>${escapeHtml(usageMoney(part.cost))}</b></li>`).join('')}</ul>` : ''}${models.length ? `<div class="usage-prices"><h3>Prices used</h3>${models.map(model => `<p>${escapeHtml(prices[model] ? `${model}: $${prices[model].input} in, $${prices[model].output} out per million tokens` : `${model}: no price set`)}</p>`).join('')}</div>` : ''}<button class="button button-primary js-edit-prices" type="button">Edit prices</button><p class="usage-note">Only Verity’s own calls are counted. FlexAgent’s model, speech and LiveKit costs are not visible here. Customer chat is not counted.</p></aside>`;
+  const body = documents.length
+    ? `<section class="usage-cards">${documents.map(document => usageCard(document, prices)).join('')}</section>`
+    : `<section class="panel card-pad usage-empty"><span class="eyebrow">NO USAGE YET</span><h2 class="minor-title">Nothing has used tokens in this workspace yet.</h2><p class="page-subtitle">Usage appears here when you upload a source, generate a draft, re-check a rubric, or run an evaluation.</p></section>`;
+  return `${header('Usage', 'Tokens and estimated cost for every step, per document: indexing, drafts, rubric checks and evaluation runs.')}<div class="usage-layout">${body}${side}</div>`;
+}
+// Settings: prices per million tokens for every model Verity has used or is set up to use.
+function usagePricesForm() {
+  const prices = workspace.usagePrices || {};
+  const models = [
+    ...new Set([
+      ...Object.keys(prices),
+      ...workspace.connections
+        .filter(connection => connection.model && !connection.kind)
+        .map(connection => connection.model),
+      ...(workspace.usage || []).map(entry => entry.model),
+    ]),
+  ].sort();
+  return `<h2 class="minor-title">Usage prices</h2><p class="settings-intro">Dollars per million tokens, used to estimate cost on the Usage page. Check your provider’s current prices; changing one updates every line.</p><div class="usage-price-list">${models
+    .map(
+      model =>
+        `<form class="usage-price-row js-price-form" data-model="${escapeHtml(model)}"><strong>${escapeHtml(model)}</strong><label>Input<input name="input" type="number" min="0" step="0.001" required value="${escapeHtml(prices[model]?.input ?? '')}" /></label><label>Output<input name="output" type="number" min="0" step="0.001" required value="${escapeHtml(prices[model]?.output ?? '')}" /></label><button class="button button-secondary button-small" type="submit">Save</button></form>`,
+    )
+    .join('')}</div>`;
+}
+async function savePrice(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  try {
+    const response = await fetch('/api/usage-prices', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: form.dataset.model,
+        input: form.elements.input.value,
+        output: form.elements.output.value,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error);
+    workspace.usagePrices = body;
+    toast('Price saved for ' + form.dataset.model + '.');
+  } catch (error) {
+    toast(error.message || 'The price could not be saved.');
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+const pages = { home, evaluation, documents, technical, datasets, chat, results, usage, settings };
 let renderedPage = null;
 let renderedBody = null;
 // refresh: true is for background loads (the FlexAgent organization and agent lists). When the page body is unchanged,
 // only the Organization / Agent strip is swapped, so the page doesn't redraw and replay its entrance animation.
 function render(page = location.hash.slice(1).split(':')[0] || 'home', { refresh = false } = {}) {
-  const scopedPages = new Set(['documents', 'datasets', 'evaluation', 'results', 'technical']);
+  const scopedPages = new Set(['documents', 'datasets', 'evaluation', 'results', 'technical', 'usage']);
   const scope = scopedPages.has(page) ? scopeControls() : '';
   const body = pages[page] ? pages[page]() : pages.home();
   if (refresh && page === renderedPage && body === renderedBody) {
@@ -1087,6 +1292,11 @@ function bind(page) {
     }),
   );
   document.querySelector('#openai-form')?.addEventListener('submit', saveOpenAISetup);
+  document.querySelectorAll('.js-price-form').forEach(form => form.addEventListener('submit', savePrice));
+  document.querySelector('.js-edit-prices')?.addEventListener('click', () => {
+    settingsTab = 'prices';
+    location.hash = 'settings';
+  });
   document
     .querySelectorAll('.js-settings-tab')
     .forEach(tab => tab.addEventListener('click', () => showSettingsTab(tab.dataset.tab)));
