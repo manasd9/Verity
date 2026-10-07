@@ -397,6 +397,93 @@ function coverageMarkup(coverage) {
     .join('');
   return `<section class="coverage" aria-label="Source coverage"><p><b>${escapeHtml(`Covered ${coverage.covered} of ${coverage.total} ${coverage.total === 1 ? one : many}.`)}</b> ${escapeHtml(summary + unmatched)}</p><details><summary>${escapeHtml(`Show every ${one}`)}</summary><ul>${rows}</ul></details></section>`;
 }
+// Rubric check: whether each required point is backed by the evidence and asked by the question. Results apply only
+// while the question and its evidence are unchanged; an edited point simply has no check.
+function rubricCheckFor(dataset, item) {
+  return dataset.rubricCheck?.cases?.find(
+    entry => entry.question === item.question && entry.sourceEvidence === item.sourceEvidence,
+  );
+}
+// Checks saved before 7 October 2026 call this flag asked.
+function pointNeeded(point) {
+  return point.needed ?? point.asked !== false;
+}
+function pointBacked(point) {
+  return point.supported || point.startsBefore || point.continues;
+}
+function rubricWarningCount(entry) {
+  return (entry?.points || []).filter(
+    point => !point.kept && !point.removed && (!pointBacked(point) || !pointNeeded(point)),
+  ).length;
+}
+function rubricCheckMarkup(entry, index, editable) {
+  const points = (entry?.points || []).filter(point => !point.removed);
+  if (!points.length) return '';
+  const rows = points
+    .map(point => {
+      const flags = point.kept
+        ? []
+        : [
+            pointBacked(point) ? '' : 'Not in the evidence',
+            pointNeeded(point) ? '' : 'Not needed for this request',
+          ].filter(Boolean);
+      const actions =
+        flags.length && editable
+          ? `<span class="rubric-actions"><button class="rubric-remove js-rubric-remove" data-index="${index}" data-point="${escapeHtml(point.point)}" type="button">Remove point</button><button class="rubric-keep js-rubric-keep" data-index="${index}" data-point="${escapeHtml(point.point)}" type="button">Keep</button></span>`
+          : '';
+      const where = point.kept
+        ? 'Kept for testing'
+        : point.startsBefore && point.continues
+          ? 'Uses the passages before and after'
+          : point.startsBefore
+            ? 'In the previous passage'
+            : point.continues
+              ? 'In the next passage'
+              : '';
+      return `<li class="${flags.length ? 'is-flagged' : 'is-ok'}"><span>${escapeHtml(point.point)}</span>${point.quote ? `<q>${escapeHtml(point.quote)}</q>` : ''}${where ? `<small>${escapeHtml(where)}</small>` : ''}${flags.length ? `<b>${escapeHtml(flags.join(' · '))}</b>` : ''}${actions}</li>`;
+    })
+    .join('');
+  return `<section id="rubric-check-${index}" class="rubric-check field full" aria-label="Rubric check"><p><b>Rubric check</b> Remove a flagged point, or keep it if you want it tested.</p><ul>${rows}</ul></section>`;
+}
+// The scenario number in the review list, ringed in amber while its rubric needs a look (truncated text cannot hide it).
+function reviewListNumber(dataset, item, index) {
+  return rubricWarningCount(rubricCheckFor(dataset, item))
+    ? `<span class="review-list-number has-rubric-flag" title="Rubric needs a look">${index + 1}<span class="visually-hidden"> (rubric needs a look)</span></span>`
+    : `<span class="review-list-number">${index + 1}</span>`;
+}
+function rubricCheckNote(dataset, editable = false) {
+  const check = dataset.rubricCheck;
+  const recheck = editable
+    ? ` <button class="button button-secondary button-small js-rubric-recheck" type="button">${check ? 'Re-check rubric' : 'Run rubric check'}</button>`
+    : '';
+  if (!check)
+    return editable
+      ? `<p id="rubric-note" class="rubric-note" role="note"><b>Rubric check:</b> not run on this draft yet.${recheck}</p>`
+      : '';
+  if (check.error)
+    return `<p class="rubric-note" role="note">The rubric check could not run on this draft (${escapeHtml(check.error)}). Compare each rubric with its evidence by hand.${recheck}</p>`;
+  const counts = (check.cases || []).map(rubricWarningCount);
+  const points = counts.reduce((sum, count) => sum + count, 0);
+  const questions = counts.filter(Boolean).length;
+  const flagged = (dataset.cases || [])
+    .map((item, index) => (rubricWarningCount(rubricCheckFor(dataset, item)) ? index : -1))
+    .filter(index => index >= 0);
+  const links = flagged
+    .map(
+      index => `<button class="rubric-jump js-review-jump" data-index="${index}" type="button">#${index + 1}</button>`,
+    )
+    .join(', ');
+  const summary = points
+    ? points +
+      (points === 1 ? ' point' : ' points') +
+      ' in ' +
+      questions +
+      (questions === 1 ? ' question' : ' questions') +
+      (points === 1 ? ' needs' : ' need') +
+      ' a look: not in the evidence, or not needed for this request.'
+    : 'Every checked required point is backed by its evidence and needed for its request.'; // Plain text; escaped below.
+  return `<p id="rubric-note" class="rubric-note" role="note"><b>Rubric check:</b> ${escapeHtml(summary)}${links ? ` Check ${flagged.length === 1 ? 'scenario' : 'scenarios'} ${links}.` : ''}${recheck}</p>`;
+}
 function declineCheckNote(dataset) {
   const check = dataset.declineCheck;
   if (!check) return '';
@@ -422,20 +509,20 @@ function datasetReview(dataset) {
   const cases = dataset.cases
     .map(
       (item, index) =>
-        `<fieldset id="review-case-${index}" class="review-case" ${index === active ? '' : 'hidden'}><legend>Scenario ${index + 1} of ${dataset.cases.length}</legend>${isDecline(item) ? `${declineTag(item)}<input type="hidden" data-field="caseType" data-index="${index}" value="decline" /><input type="hidden" data-field="declineKind" data-index="${index}" value="${escapeHtml(item.declineKind || 'close-but-missing')}" /><p class="help">The agent should say it does not have this information, or offer to connect the customer with staff, without inventing details. Check it is not answered anywhere in the agent’s knowledge base, including sources Verity does not have.</p>` : ''}${editable && dataset.cases.length > 1 ? `<button class="review-delete js-delete-scenario" data-index="${index}" type="button">Remove scenario</button>` : ''}<div class="form-grid"><div class="field full"><label>Customer question or scenario</label><textarea data-field="question" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.question || '')}</textarea></div><div class="field full"><label>Expected answer</label><textarea data-field="expectedAnswer" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.expectedAnswer || '')}</textarea></div><div class="field"><label>Required points (one per line)</label><textarea data-field="requiredPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.requiredPoints || []).join('\n'))}</textarea></div><div class="field"><label>Forbidden points (one per line)</label><textarea data-field="forbiddenPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.forbiddenPoints || []).join('\n'))}</textarea></div>${dataset.documentKind === 'website' ? `<div class="field full"><label>Website page URL${isDecline(item) ? ' (optional)' : ''}</label><input data-field="sourceUrl" data-index="${index}" value="${escapeHtml(item.sourceUrl || '')}" ${editable ? '' : 'readonly'} /></div>` : ''}<div class="field full"><label>${isDecline(item) ? 'Nearby passage (optional, the closest thing the source does say)' : 'Source evidence'}</label><textarea data-field="sourceEvidence" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.sourceEvidence || '')}</textarea></div><details class="review-advanced" ${hasAdvanced(item) ? 'open' : ''}><summary>Advanced: multi-turn conversation (optional)</summary><div class="form-grid"><div class="field full"><label>Conversation turns (JSON, optional)</label><textarea data-field="turns" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='[{"userMessage":"...","expectedAnswer":"...","requiredPoints":[],"forbiddenPoints":[],"sourceEvidence":"..."}]'>${escapeHtml((item.turns || []).length ? JSON.stringify(item.turns, null, 2) : '')}</textarea></div><div class="field full"><label>Expected final memory (JSON string array, optional)</label><textarea data-field="expectedFinalMemory" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='["name: Sam", "city: Boston"]'>${escapeHtml((item.expectedFinalMemory || []).length ? JSON.stringify(item.expectedFinalMemory, null, 2) : '')}</textarea></div></div></details></div></fieldset>`,
+        `<fieldset id="review-case-${index}" class="review-case" ${index === active ? '' : 'hidden'}><legend>Scenario ${index + 1} of ${dataset.cases.length}</legend>${isDecline(item) ? `${declineTag(item)}<input type="hidden" data-field="caseType" data-index="${index}" value="decline" /><input type="hidden" data-field="declineKind" data-index="${index}" value="${escapeHtml(item.declineKind || 'close-but-missing')}" /><p class="help">The agent should say it does not have this information, or offer to connect the customer with staff, without inventing details. Check it is not answered anywhere in the agent’s knowledge base, including sources Verity does not have.</p>` : ''}${editable && dataset.cases.length > 1 ? `<button class="review-delete js-delete-scenario" data-index="${index}" type="button">Remove scenario</button>` : ''}<div class="form-grid"><div class="field full"><label>Customer question or scenario</label><textarea data-field="question" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.question || '')}</textarea></div><div class="field full"><label>Expected answer</label><textarea data-field="expectedAnswer" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.expectedAnswer || '')}</textarea></div><div class="field"><label>Required points (one per line)</label><textarea data-field="requiredPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.requiredPoints || []).join('\n'))}</textarea></div><div class="field"><label>Forbidden points (one per line)</label><textarea data-field="forbiddenPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.forbiddenPoints || []).join('\n'))}</textarea></div>${rubricCheckMarkup(rubricCheckFor(dataset, item), index, editable)}${dataset.documentKind === 'website' ? `<div class="field full"><label>Website page URL${isDecline(item) ? ' (optional)' : ''}</label><input data-field="sourceUrl" data-index="${index}" value="${escapeHtml(item.sourceUrl || '')}" ${editable ? '' : 'readonly'} /></div>` : ''}<div class="field full"><label>${isDecline(item) ? 'Nearby passage (optional, the closest thing the source does say)' : 'Source evidence'}</label><textarea data-field="sourceEvidence" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.sourceEvidence || '')}</textarea></div><details class="review-advanced" ${hasAdvanced(item) ? 'open' : ''}><summary>Advanced: multi-turn conversation (optional)</summary><div class="form-grid"><div class="field full"><label>Conversation turns (JSON, optional)</label><textarea data-field="turns" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='[{"userMessage":"...","expectedAnswer":"...","requiredPoints":[],"forbiddenPoints":[],"sourceEvidence":"..."}]'>${escapeHtml((item.turns || []).length ? JSON.stringify(item.turns, null, 2) : '')}</textarea></div><div class="field full"><label>Expected final memory (JSON string array, optional)</label><textarea data-field="expectedFinalMemory" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='["name: Sam", "city: Boston"]'>${escapeHtml((item.expectedFinalMemory || []).length ? JSON.stringify(item.expectedFinalMemory, null, 2) : '')}</textarea></div></div></details></div></fieldset>`,
     )
     .join('');
   const list = dataset.cases
     .map(
       (item, index) =>
-        `<button class="review-list-item js-review-pick" data-index="${index}" type="button" ${index === active ? 'aria-current="true"' : ''}><span class="review-list-number">${index + 1}</span><span class="review-list-text">${escapeHtml(reviewScenarioLabel(item))}${isDecline(item) ? '<span class="review-list-flag decline-flag">Should decline</span>' : ''}</span>${reviewScenarioIncomplete(item) ? '<span class="review-list-flag" title="Question, expected answer, or source evidence is empty">Needs input</span>' : ''}</button>`,
+        `<button class="review-list-item js-review-pick" data-index="${index}" type="button" ${index === active ? 'aria-current="true"' : ''}>${reviewListNumber(dataset, item, index)}<span class="review-list-text">${escapeHtml(reviewScenarioLabel(item))}${isDecline(item) ? '<span class="review-list-flag decline-flag">Should decline</span>' : ''}</span>${reviewScenarioIncomplete(item) ? '<span class="review-list-flag" title="Question, expected answer, or source evidence is empty">Needs input</span>' : ''}</button>`,
     )
     .join('');
   const pager = `<div class="review-pager"><span id="review-position">Scenario ${active + 1} of ${dataset.cases.length}</span><div class="button-row"><button class="button button-secondary button-small js-review-step" data-step="-1" type="button" ${active === 0 ? 'disabled' : ''}>‹ Previous</button><button class="button button-secondary button-small js-review-step" data-step="1" type="button" ${active === dataset.cases.length - 1 ? 'disabled' : ''}>Next ›</button></div></div>`;
   const actions = editable
     ? `<div class="button-row"><button class="button button-secondary" type="submit">Save changes</button><button class="button button-primary js-approve" data-id="${escapeHtml(dataset.id)}" type="button">Save & approve</button></div><p id="review-status" class="help" aria-live="polite">Write or verify the expected answer and evidence for every scenario before approving.</p>`
     : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
-  return `${header('Review golden dataset', `${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'secondary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${declineCheckNote(dataset)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
+  return `${header('Review golden dataset', `${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'secondary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${declineCheckNote(dataset)}${rubricCheckNote(dataset, editable)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
 }
 
 function gapDiagnosisMarkup(result) {
@@ -1155,6 +1242,18 @@ function bind(page) {
     event.preventDefault();
     showReviewScenario(next);
     document.querySelector(`.js-review-pick[data-index="${reviewScenarioIndex}"]`)?.focus();
+  });
+  document.querySelector('#dataset-review-form')?.addEventListener('click', event => {
+    const target = event.target.closest('.js-review-jump, .js-rubric-remove, .js-rubric-keep, .js-rubric-recheck');
+    if (!target) return;
+    const index = Number(target.dataset.index);
+    if (target.matches('.js-rubric-recheck')) recheckRubric(target);
+    else if (target.matches('.js-review-jump')) showReviewScenario(index);
+    else if (target.matches('.js-rubric-remove')) removeRubricPoint(index, target.dataset.point);
+    else
+      updateRubricFlag(index, target.dataset.point, point => {
+        point.kept = true;
+      });
   });
   document.querySelector('#dataset-review-form')?.addEventListener('input', event => {
     const index = event.target.dataset?.index;
@@ -1937,11 +2036,73 @@ function reviewedCases(form, dataset) {
   });
 }
 
+function keptRubricPoints(dataset) {
+  return (dataset.rubricCheck?.cases || []).flatMap(entry =>
+    entry.points
+      .filter(point => point.kept)
+      .map(point => ({ question: entry.question, sourceEvidence: entry.sourceEvidence, point: point.point })),
+  );
+}
+// Remove and Keep change only the rubric panel, the note and the list marker, so unsaved edits elsewhere survive.
+function updateRubricFlag(index, pointText, change) {
+  const dataset = workspace.datasets.find(item => item.id === reviewingDatasetId);
+  const item = dataset?.cases[index];
+  const entry = item && rubricCheckFor(dataset, item);
+  const point = entry?.points.find(candidate => candidate.point === pointText);
+  if (!point) return;
+  change(point);
+  const panel = document.querySelector(`#rubric-check-${index}`);
+  if (panel) panel.outerHTML = rubricCheckMarkup(entry, index, dataset.status !== 'approved');
+  const note = document.querySelector('#rubric-note');
+  if (note) note.outerHTML = rubricCheckNote(dataset, dataset.status !== 'approved');
+  const number = document.querySelector(`.js-review-pick[data-index="${index}"] .review-list-number`);
+  if (number) number.outerHTML = reviewListNumber(dataset, item, index);
+}
+function removeRubricPoint(index, pointText) {
+  if (
+    !window.confirm(`Remove the required point "${pointText}" from scenario ${index + 1}? It is removed when you save.`)
+  )
+    return;
+  const field = document.querySelector(`[data-field="requiredPoints"][data-index="${index}"]`);
+  if (field)
+    field.value = field.value
+      .split('\n')
+      .filter(line => line.trim() !== pointText)
+      .join('\n');
+  updateRubricFlag(index, pointText, point => {
+    point.removed = true;
+  });
+}
+
+// Saves the review, then re-runs the rubric check on what was saved, so the check always matches the stored draft.
+async function recheckRubric(button) {
+  const form = document.querySelector('#dataset-review-form');
+  const dataset = workspace.datasets.find(item => item.id === reviewingDatasetId);
+  if (!form || !dataset) return;
+  button.disabled = true;
+  button.textContent = 'Saving and checking…';
+  try {
+    await persistDatasetReview(form, dataset);
+    const response = await fetch(`/api/datasets/${dataset.id}/recheck-rubric`, { method: 'POST' });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error);
+    workspace.datasets = workspace.datasets.map(item => (item.id === body.id ? body : item));
+    render('datasets');
+    toast(
+      body.rubricCheck?.error ? 'The rubric check could not run. Try again.' : 'Review saved and rubric re-checked.',
+    );
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Re-check rubric';
+    toast(error.message || 'The rubric could not be re-checked.');
+  }
+}
+
 async function persistDatasetReview(form, dataset) {
   const response = await fetch(`/api/datasets/${dataset.id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cases: reviewedCases(form, dataset) }),
+    body: JSON.stringify({ cases: reviewedCases(form, dataset), keptRubricPoints: keptRubricPoints(dataset) }),
   });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error);

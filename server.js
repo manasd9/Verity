@@ -1299,6 +1299,127 @@ async function checkDeclineCases(store, source, control, cases, signal) {
     keywordOnlySources,
   };
 }
+// Rubric check: a second look at each generated question. For every required point the model quotes the words in
+// the evidence (or the passage after it) that state the point, and says whether the question asks for it. Verity
+// verifies each quote by text match, so support cannot be invented. It only flags; nothing is removed.
+function rubricCheckEntries(cases, sources) {
+  return cases
+    .filter(item => item.caseType !== 'decline' && !item.turns?.length && item.requiredPoints.length)
+    .map(item => {
+      const at = sources.findIndex(source => source.text === item.sourceEvidence);
+      // Passages are cut every 500 characters, so a rule can start in the passage before the evidence or end after it.
+      const neighbour = offset => {
+        const passage = at >= 0 ? sources[at + offset] : undefined;
+        return passage && passage.sourceUrl === sources[at].sourceUrl ? passage.text : '';
+      };
+      return { item, previous: neighbour(-1), next: neighbour(1) };
+    });
+}
+function rubricCheckMessages(entries) {
+  const listing = entries
+    .map(({ item, previous, next }, index) =>
+      [
+        `QUESTION ${index + 1}: ${item.question}`,
+        `EXPECTED ANSWER: ${item.expectedAnswer}`,
+        ...item.requiredPoints.map((point, at) => `REQUIRED POINT ${index + 1}.${at + 1}: ${point}`),
+        `PREVIOUS PASSAGE: ${previous || '(none)'}`,
+        `EVIDENCE: ${item.sourceEvidence}`,
+        `NEXT PASSAGE: ${next || '(none)'}`,
+      ].join('\n'),
+    )
+    .join('\n\n');
+  return [
+    { role: 'system', content: `You check test rubrics against their source evidence. ${UNTRUSTED_SOURCE_NOTICE}` },
+    {
+      role: 'user',
+      content: `For every required point of every question: copy the words from its EVIDENCE, PREVIOUS PASSAGE or NEXT PASSAGE that state the point, exactly as written and without ellipses: one quote, or several when the point combines parts stated in different places (an empty list when nothing states it). The three passages are consecutive, so a quote may run from one into the next. Then say whether the point is needed to handle this request correctly: true for information the customer asked for and for rules the agent must follow in this situation, false only for extra information the request does not need. Return JSON only: {"results":[{"question":1,"points":[{"point":1,"quotes":[""],"needed":true}]}]}\n\n${fenceUntrusted('QUESTIONS, RUBRICS AND EVIDENCE', listing)}`,
+    },
+  ];
+}
+const trimQuote = quote =>
+  squash(quote)
+    .trim()
+    .replace(/^["'“”‘’…]+|["'“”‘’…]+$/g, '')
+    .trim();
+function applyRubricCheck(entries, raw) {
+  const results = JSON.parse(raw).results;
+  if (!Array.isArray(results)) throw new Error('The control model did not return a rubric check.');
+  return entries.map(({ item, previous, next }, index) => {
+    const result = results.find(entry => entry?.question === index + 1);
+    if (!Array.isArray(result?.points))
+      throw new Error('The control model must return a rubric check for every question.');
+    // The three passages are consecutive cuts of the document, so they are searched as one text: a quote can
+    // cross a cut, and a point can combine parts from several passages.
+    const preceding = squash(previous).trim();
+    const evidence = squash(item.sourceEvidence).trim();
+    const following = squash(next).trim();
+    const joined = [preceding, evidence, following].filter(Boolean).join(' ');
+    const evidenceStart = preceding ? preceding.length + 1 : 0;
+    const evidenceEnd = evidenceStart + evidence.length;
+    return {
+      question: item.question,
+      sourceEvidence: item.sourceEvidence,
+      points: item.requiredPoints.map((point, at) => {
+        const answer = result.points.find(entry => entry?.point === at + 1);
+        if (
+          !Array.isArray(answer?.quotes) ||
+          !answer.quotes.every(quote => typeof quote === 'string') ||
+          typeof answer.needed !== 'boolean'
+        )
+          throw new Error(
+            'The control model must return quotes and a needed flag for every required point in the rubric check.',
+          );
+        // Every quote must really be in the passages; each one is located by where it starts and ends.
+        const quotes = answer.quotes.map(trimQuote).filter(quote => quote.length >= 8);
+        const spans = quotes.map(quote => {
+          const start = joined.indexOf(quote);
+          return start < 0 ? null : { start, end: start + quote.length };
+        });
+        const found = quotes.length > 0 && spans.every(Boolean);
+        const supported = found && spans.every(span => span.start >= evidenceStart && span.end <= evidenceEnd);
+        const startsBefore = found && !supported && spans.some(span => span.start < evidenceStart);
+        const continues = found && !supported && spans.some(span => span.end > evidenceEnd);
+        return {
+          point,
+          supported,
+          startsBefore,
+          continues,
+          quote: found ? quotes.join(' … ') : '',
+          needed: answer.needed,
+        };
+      }),
+    };
+  });
+}
+// Points a reviewer chose to keep stop counting as needing a look. Unknown or malformed entries are ignored.
+function markKeptRubricPoints(check, kept) {
+  if (!check?.cases || !Array.isArray(kept)) return check;
+  const text = value => (typeof value === 'string' ? value : null);
+  for (const choice of kept) {
+    const entry = check.cases.find(
+      candidate =>
+        candidate.question === text(choice?.question) && candidate.sourceEvidence === text(choice?.sourceEvidence),
+    );
+    const point = entry?.points.find(candidate => candidate.point === text(choice?.point));
+    if (point) point.kept = true;
+  }
+  return check;
+}
+// After a review is saved, keep checks only for questions and points that did not change.
+function keepRubricCheck(check, cases) {
+  if (!check?.cases) return check;
+  return {
+    ...check,
+    cases: check.cases
+      .map(entry => {
+        const item = cases.find(
+          candidate => candidate.question === entry.question && candidate.sourceEvidence === entry.sourceEvidence,
+        );
+        return item && { ...entry, points: entry.points.filter(point => item.requiredPoints.includes(point.point)) };
+      })
+      .filter(entry => entry?.points.length),
+  };
+}
 const LOCAL_HOST = /^(127\.0\.0\.1|localhost)(:\d{1,5})?$/i;
 const LOCAL_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d{1,5})?$/i;
 // Blocks DNS rebinding (foreign Host) and cross-site writes (foreign Origin). Requests without an Origin, such as curl or tests, are allowed.
@@ -2011,6 +2132,12 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const answerCases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!answerCases.length)
       throw new Error('The control model did not cite any valid source passages. Please try again.');
+    const rubricEntries = rubricCheckEntries(answerCases, sources);
+    const rubricCheckRun = rubricEntries.length
+      ? callModel(connection, rubricCheckMessages(rubricEntries), true, { signal })
+          .then(raw => ({ checkedAt: new Date().toISOString(), cases: applyRubricCheck(rubricEntries, raw) }))
+          .catch(error => ({ error: error.message }))
+      : Promise.resolve(undefined);
     let declineCheck;
     let declines = [];
     if (declineCount) {
@@ -2033,6 +2160,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       }
     }
     const cases = [...answerCases, ...declines];
+    const rubricCheck = await rubricCheckRun;
     const dataset = {
       id: id('dataset'),
       documentId,
@@ -2043,6 +2171,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       status: 'draft',
       cases,
       ...(declineCheck ? { declineCheck } : {}),
+      ...(rubricCheck ? { rubricCheck } : {}),
       createdAt: new Date().toISOString(),
     };
     const latest = readStore();
@@ -2069,9 +2198,56 @@ app.put('/api/datasets/:id', (req, res) => {
   const source = resolveDocument(store, dataset.documentId);
   if (!source) return res.status(400).json({ error: 'The source for this dataset is unavailable.' });
   dataset.cases = validateWebsiteCases(source, req.body.cases.map(normalizeDatasetCase));
+  if (dataset.rubricCheck)
+    dataset.rubricCheck = markKeptRubricPoints(
+      keepRubricCheck(dataset.rubricCheck, dataset.cases),
+      req.body.keptRubricPoints,
+    );
   dataset.updatedAt = new Date().toISOString();
   saveStore(store);
   res.json(publicDataset(store, dataset));
+});
+// Re-runs the rubric check on a draft's saved scenarios (the page saves the review first). Keep choices carry
+// over for points that did not change.
+app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
+  try {
+    const store = readStore();
+    const dataset = store.datasets.find(item => item.id === req.params.id);
+    if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+    if (recordScope(dataset)) requestedScope(store, dataset);
+    if (dataset.status === 'approved') return res.status(400).json({ error: 'Approved datasets cannot be changed.' });
+    const source = resolveDocument(store, dataset.documentId);
+    if (!source) return res.status(400).json({ error: 'The source for this dataset is unavailable.' });
+    const control = store.connections.find(item => item.role === 'control');
+    if (!control) return res.status(400).json({ error: 'Connect a control model in Settings first.' });
+    const sources = source.kind === 'website' ? sourcePassages(source).slice(0, 120) : sourcePassages(source);
+    const entries = rubricCheckEntries(dataset.cases, sources);
+    let rubricCheck;
+    try {
+      rubricCheck = {
+        checkedAt: new Date().toISOString(),
+        cases: entries.length
+          ? applyRubricCheck(entries, await callModel(control, rubricCheckMessages(entries), true))
+          : [],
+      };
+    } catch (error) {
+      rubricCheck = { error: error.message };
+    }
+    const kept = (dataset.rubricCheck?.cases || []).flatMap(entry =>
+      entry.points
+        .filter(point => point.kept)
+        .map(point => ({ question: entry.question, sourceEvidence: entry.sourceEvidence, point: point.point })),
+    );
+    const latest = readStore();
+    const saved = latest.datasets.find(item => item.id === dataset.id);
+    if (!saved) return res.status(404).json({ error: 'Dataset not found.' });
+    saved.rubricCheck = markKeptRubricPoints(rubricCheck, kept);
+    saved.updatedAt = new Date().toISOString();
+    saveStore(latest);
+    res.json(publicDataset(latest, saved));
+  } catch (error) {
+    next(error);
+  }
 });
 app.post('/api/datasets/:id/approve', (req, res) => {
   const store = readStore();
@@ -2441,4 +2617,9 @@ module.exports = {
   sourceTopics,
   datasetCoverage,
   passageSections,
+  rubricCheckEntries,
+  rubricCheckMessages,
+  applyRubricCheck,
+  keepRubricCheck,
+  markKeptRubricPoints,
 };

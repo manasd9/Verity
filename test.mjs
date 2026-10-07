@@ -1117,6 +1117,133 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       js.indexOf('function incompleteAnswersMarkup'),
       js.indexOf('\n}\n', js.indexOf('function evaluationSummaryMarkup')) + 2,
     );
+    {
+      const rubricCode = topLevel(
+        js,
+        'rubricCheckFor',
+        'pointNeeded',
+        'pointBacked',
+        'reviewListNumber',
+        'rubricWarningCount',
+        'rubricCheckMarkup',
+        'rubricCheckNote',
+      );
+      const { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber } = new Function(
+        `${helpers}\n${rubricCode}; return { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber };`,
+      )();
+      const entry = {
+        question: 'Q <1>',
+        sourceEvidence: 'E',
+        points: [
+          { point: 'Costs $40', supported: true, continues: false, needed: true, quote: 'costs $40' },
+          { point: 'Extra <night>', supported: false, continues: true, needed: false, quote: 'additional night' },
+          { point: 'Free breakfast', supported: false, continues: false, asked: true, quote: '' }, // saved before the rename
+        ],
+      };
+      const dataset = { rubricCheck: { cases: [entry] } };
+      assert.equal(rubricCheckFor(dataset, { question: 'Q <1>', sourceEvidence: 'E' }), entry);
+      assert.equal(
+        rubricCheckFor(dataset, { question: 'Q <1>', sourceEvidence: 'Edited' }),
+        undefined,
+        'edited evidence has no check',
+      );
+      assert.equal(rubricWarningCount(entry), 2);
+      assert.equal(rubricWarningCount(undefined), 0);
+      const markup = rubricCheckMarkup(entry, 3, true);
+      assert.match(markup, /^<section id="rubric-check-3" class="rubric-check field full"/);
+      assert.match(markup, /<li class="is-ok"><span>Costs \$40<\/span><q>costs \$40<\/q><\/li>/);
+      assert.match(
+        markup,
+        /<li class="is-flagged"><span>Extra &lt;night&gt;<\/span><q>additional night<\/q><small>In the next passage<\/small><b>Not needed for this request<\/b><span class="rubric-actions"><button class="rubric-remove js-rubric-remove" data-index="3" data-point="Extra &lt;night&gt;" type="button">Remove point<\/button><button class="rubric-keep js-rubric-keep" data-index="3" data-point="Extra &lt;night&gt;" type="button">Keep<\/button><\/span><\/li>/,
+      );
+      assert.match(
+        markup,
+        /<li class="is-flagged"><span>Free breakfast<\/span><b>Not in the evidence<\/b><span class="rubric-actions">/,
+      );
+      assert.doesNotMatch(
+        rubricCheckMarkup(entry, 3, false),
+        /rubric-actions/,
+        'an approved dataset shows flags without buttons',
+      );
+      assert.equal(rubricCheckMarkup(undefined, 0, true), '');
+      // Keep clears a flag and says so; a removed point disappears; neither counts as needing a look.
+      const reviewed = {
+        ...entry,
+        points: [entry.points[0], { ...entry.points[1], kept: true }, { ...entry.points[2], removed: true }],
+      };
+      assert.equal(rubricWarningCount(reviewed), 0);
+      assert.match(
+        rubricCheckMarkup(reviewed, 3, true),
+        /<li class="is-ok"><span>Extra &lt;night&gt;<\/span><q>additional night<\/q><small>Kept for testing<\/small><\/li>/,
+      );
+      assert.doesNotMatch(rubricCheckMarkup(reviewed, 3, true), /Free breakfast|rubric-actions/);
+      assert.match(rubricCheckNote(dataset), /2 points in 1 question need a look/);
+      const twoFlagged = {
+        cases: [
+          { question: 'Q <1>', sourceEvidence: 'E' },
+          { question: 'Q <1>', sourceEvidence: 'E' },
+        ],
+        rubricCheck: { cases: [entry] },
+      };
+      assert.match(
+        rubricCheckNote(twoFlagged),
+        /Check scenarios <button[^>]*>#1<\/button>, <button[^>]*>#2<\/button>\./,
+      );
+      // The note links to each flagged scenario; the list ringed the number of each.
+      const withCases = {
+        cases: [
+          { question: 'Other', sourceEvidence: 'X' },
+          { question: 'Q <1>', sourceEvidence: 'E' },
+        ],
+        rubricCheck: { cases: [entry] },
+      };
+      assert.match(
+        rubricCheckNote(withCases),
+        /Check scenario <button class="rubric-jump js-review-jump" data-index="1" type="button">#2<\/button>\.<\/p>$/,
+      );
+      assert.match(
+        reviewListNumber(withCases, withCases.cases[1], 1),
+        /^<span class="review-list-number has-rubric-flag" title="Rubric needs a look">2<span class="visually-hidden"> \(rubric needs a look\)<\/span><\/span>$/,
+      );
+      assert.equal(reviewListNumber(withCases, withCases.cases[0], 0), '<span class="review-list-number">1</span>');
+      assert.match(
+        rubricCheckNote({ rubricCheck: { cases: [{ points: [entry.points[0]] }] } }),
+        /Every checked required point is backed by its evidence and needed for its request/,
+      );
+      assert.match(
+        rubricCheckNote({ rubricCheck: { error: 'bad <reply>' } }),
+        /could not run on this draft \(bad &lt;reply&gt;\)/,
+      );
+      assert.equal(rubricCheckNote({}), '');
+      // Drafts offer a re-check (or a first check); approved datasets and read-only views do not.
+      assert.match(
+        rubricCheckNote(dataset, true),
+        /<button class="button button-secondary button-small js-rubric-recheck" type="button">Re-check rubric<\/button><\/p>$/,
+      );
+      assert.doesNotMatch(rubricCheckNote(dataset), /js-rubric-recheck/);
+      assert.match(
+        rubricCheckNote({}, true),
+        /not run on this draft yet\. <button[^>]*js-rubric-recheck[^>]*>Run rubric check<\/button>/,
+      );
+      assert.match(
+        rubricCheckNote({ rubricCheck: { error: 'x' } }, true),
+        /Compare each rubric with its evidence by hand\. <button[^>]*>Re-check rubric/,
+      );
+      assert.match(js, /\$\{rubricCheckNote\(dataset, editable\)\}/);
+      assert.match(
+        js,
+        /await persistDatasetReview\(form, dataset\);\s*const response = await fetch\(`\/api\/datasets\/\$\{dataset\.id\}\/recheck-rubric`/,
+        're-check saves the review first',
+      );
+      assert.match(js, /\$\{rubricCheckMarkup\(rubricCheckFor\(dataset, item\), index, editable\)\}/);
+      assert.match(js, /keptRubricPoints: keptRubricPoints\(dataset\)/, 'saving a review sends the kept points');
+      assert.match(
+        js,
+        /closest\('\.js-review-jump, \.js-rubric-remove, \.js-rubric-keep, \.js-rubric-recheck'\)/,
+        'one delegated listener survives panel redraws',
+      );
+      assert.match(js, /window\.confirm\(`Remove the required point/, 'Remove asks first, naming what goes');
+    }
     const declineHelpers =
       js.slice(js.indexOf('const DECLINE_KIND_LABELS'), js.indexOf('function reviewScenarioIncomplete')) +
       js.slice(js.indexOf('function subScoresLabel'), js.indexOf('function incompleteAnswerNote'));
@@ -2228,6 +2355,224 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     globalThis.fetch = savedFetch;
   }
 }
+// Rubric check: each required point must be quoted from the evidence and needed for the request; Verity verifies quotes.
+{
+  const {
+    rubricCheckEntries,
+    rubricCheckMessages,
+    applyRubricCheck,
+    keepRubricCheck,
+    UNTRUSTED_SOURCE_NOTICE,
+  } = require('./server.js');
+  const fenced = content => {
+    const boundary = content.match(/<<<BEGIN ([0-9a-f]{16})>>>/)[1];
+    const [before, rest] = content.split(`<<<BEGIN ${boundary}>>>\n`);
+    const [inside, after] = rest.split(`\n<<<END ${boundary}>>>`);
+    return { boundary, before, inside, after };
+  };
+  const sources = [
+    {
+      text: 'Standard check-out is 11:00 AM. A 1:00 PM check-out costs $40 and also requires confirmation. Later than 1:00 PM costs one',
+    },
+    { text: 'additional night; the agent cannot waive it.' },
+    { text: 'Pets are not permitted.', sourceUrl: 'https://hotel.example/pets' },
+    { text: 'Parking is valet only.', sourceUrl: 'https://hotel.example/parking' },
+  ];
+  const checkout = normalizeDatasetCase({
+    question: 'Can I stay until 1 PM without paying?',
+    expectedAnswer: 'A 1 PM check-out costs $40 and needs confirmation.',
+    requiredPoints: [
+      '1 PM check-out costs $40',
+      'It needs confirmation',
+      'After 1 PM costs an extra night',
+      'Breakfast is free',
+    ],
+    sourceEvidence: sources[0].text,
+  });
+  const pets = normalizeDatasetCase({
+    question: 'Can I bring my dog?',
+    expectedAnswer: 'No pets.',
+    requiredPoints: ['No pets'],
+    sourceEvidence: sources[2].text,
+    sourceUrl: sources[2].sourceUrl,
+  });
+  const decline = normalizeDatasetCase({
+    caseType: 'decline',
+    question: 'Rooftop pool?',
+    expectedAnswer: 'Says it does not know.',
+    requiredPoints: ['Says it does not know'],
+  });
+  const entries = rubricCheckEntries([checkout, pets, decline], sources);
+  assert.deepEqual(
+    entries.map(entry => entry.item.question),
+    ['Can I stay until 1 PM without paying?', 'Can I bring my dog?'],
+    'should-decline questions are not checked',
+  );
+  assert.equal(
+    entries[0].next,
+    sources[1].text,
+    'the passage after the evidence is included, in case the evidence stops mid-rule',
+  );
+  assert.equal(entries[1].next, '', 'a website passage from another page is not "next"');
+  assert.equal(entries[0].previous, '', 'the first passage has no previous passage');
+  const secondHalf = normalizeDatasetCase({
+    question: 'What if I stay past 1 PM?',
+    expectedAnswer: 'One more night.',
+    requiredPoints: ['A 1 PM check-out costs $40', 'Later costs an additional night'],
+    sourceEvidence: sources[1].text,
+  });
+  const [secondHalfEntry] = rubricCheckEntries([secondHalf], sources);
+  assert.equal(
+    secondHalfEntry.previous,
+    sources[0].text,
+    'the passage before the evidence is included, in case the rule starts there',
+  );
+  const [secondHalfChecked] = applyRubricCheck(
+    [secondHalfEntry],
+    JSON.stringify({
+      results: [
+        {
+          question: 1,
+          points: [
+            { point: 1, quotes: ['A 1:00 PM check-out costs $40'], needed: true },
+            { point: 2, quotes: ['additional night; the agent cannot waive it'], needed: true },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    secondHalfChecked.points.map(point => [point.supported, point.startsBefore, point.continues]),
+    [
+      [false, true, false],
+      [true, false, false],
+    ],
+    'a quote in the previous passage counts as starting before the evidence',
+  );
+  assert.deepEqual(
+    rubricCheckEntries(
+      [normalizeDatasetCase({ ...pets, sourceEvidence: sources[3].text, sourceUrl: sources[3].sourceUrl })],
+      sources,
+    )[0].next,
+    '',
+    'the last passage has no next passage',
+  );
+
+  const [checkSystem, checkUser] = rubricCheckMessages(entries);
+  assert.ok(checkSystem.content.startsWith('You check test rubrics against their source evidence.'));
+  assert.ok(checkSystem.content.includes(UNTRUSTED_SOURCE_NOTICE));
+  const checkParts = fenced(checkUser.content);
+  assert.match(checkParts.before, /one quote, or several when the point combines parts stated in different places/);
+  assert.match(
+    checkParts.before,
+    /whether the point is needed to handle this request correctly: true for information the customer asked for and for rules the agent must follow in this situation/,
+  );
+  assert.ok(!checkParts.before.includes('Pets are not permitted'), 'evidence stays inside the fence');
+  assert.match(checkParts.inside, /REQUIRED POINT 1\.3: After 1 PM costs an extra night/);
+  assert.match(checkParts.inside, /NEXT PASSAGE: additional night; the agent cannot waive it\./);
+  assert.match(checkParts.inside, /PREVIOUS PASSAGE: \(none\)\nEVIDENCE: Standard check-out/);
+  assert.match(checkParts.before, /The three passages are consecutive, so a quote may run from one into the next\./);
+  assert.equal(checkParts.after, '');
+
+  const reply = results => JSON.stringify({ results });
+  const checked = applyRubricCheck(
+    entries,
+    reply([
+      {
+        question: 1,
+        points: [
+          { point: 1, quotes: ['“A 1:00 PM check-out   costs $40”'], needed: true },
+          { point: 2, quotes: ['also requires confirmation'], needed: true },
+          { point: 3, quotes: ['additional night; the agent cannot waive it'], needed: false },
+          { point: 4, quotes: ['Breakfast is complimentary for all guests'], needed: true },
+        ],
+      },
+      { question: 2, points: [{ point: 1, quotes: ['not'], needed: true }] },
+    ]),
+  );
+  assert.deepEqual(
+    checked[0].points.map(point => [point.supported, point.continues, point.needed, point.quote]),
+    [
+      [true, false, true, 'A 1:00 PM check-out costs $40'],
+      [true, false, true, 'also requires confirmation'],
+      [false, true, false, 'additional night; the agent cannot waive it'],
+      [false, false, true, ''],
+    ],
+    'quotes are verified by text match: spacing and quote marks are ignored, an invented quote is not support',
+  );
+  assert.equal(checked[1].points[0].supported, false, 'a quote too short to mean anything is not support');
+  // The passages are searched as one text: a quote may cross a cut, and a point may combine several quotes.
+  const [crossing] = applyRubricCheck(
+    [entries[0]],
+    JSON.stringify({
+      results: [
+        {
+          question: 1,
+          points: [
+            { point: 1, quotes: ['Later than 1:00 PM costs one additional night'], needed: true },
+            { point: 2, quotes: ['A 1:00 PM check-out costs $40', 'the agent cannot waive it'], needed: true },
+            {
+              point: 3,
+              quotes: ['A 1:00 PM check-out costs $40', 'a sentence that is nowhere in the passages'],
+              needed: true,
+            },
+            { point: 4, quotes: [], needed: true },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    crossing.points.map(point => [point.supported, point.startsBefore, point.continues]),
+    [
+      [false, false, true],
+      [false, false, true],
+      [false, false, false],
+      [false, false, false],
+    ],
+    'a quote across a cut is found; several quotes back a point only if every one is real',
+  );
+  assert.equal(crossing.points[1].quote, 'A 1:00 PM check-out costs $40 … the agent cannot waive it');
+  assert.equal(checked[0].sourceEvidence, checkout.sourceEvidence);
+  for (const bad of [
+    {},
+    { results: [] },
+    { results: [{ question: 1, points: [] }] },
+    {
+      results: [
+        { question: 1, points: [{ point: 1, quotes: [1], needed: true }] },
+        { question: 2, points: [] },
+      ],
+    },
+  ])
+    assert.throws(() => applyRubricCheck(entries, JSON.stringify(bad)), /rubric check/);
+
+  const check = { checkedAt: 'now', cases: checked };
+  const edited = [
+    { ...checkout, requiredPoints: ['1 PM check-out costs $40', 'A rewritten point'] },
+    { ...pets, sourceEvidence: 'Edited evidence.' },
+  ];
+  const kept = keepRubricCheck(check, edited);
+  assert.deepEqual(
+    kept.cases.map(entry => entry.points.map(point => point.point)),
+    [['1 PM check-out costs $40']],
+    'unchanged points keep their check; edited points and edited evidence lose it',
+  );
+  assert.deepEqual(keepRubricCheck({ error: 'failed' }, edited), { error: 'failed' });
+  const { markKeptRubricPoints } = require('./server.js');
+  const marked = markKeptRubricPoints(structuredClone(check), [
+    { question: checkout.question, sourceEvidence: checkout.sourceEvidence, point: 'Breakfast is free' },
+    { question: 'Unknown', sourceEvidence: 'x', point: 'y' },
+    null,
+    { question: 1, point: {} },
+  ]);
+  assert.deepEqual(
+    marked.cases[0].points.map(point => Boolean(point.kept)),
+    [false, false, false, true],
+    'only the named point is kept; bad entries are ignored',
+  );
+  assert.deepEqual(markKeptRubricPoints(check, 'not a list'), check);
+}
 // Coverage: which sections of a source have questions.
 {
   const { sourceTopics, datasetCoverage } = require('./server.js');
@@ -2508,6 +2853,10 @@ try {
               nearSourceIndex: 1,
             },
           ],
+        });
+      if (system.startsWith('You check test rubrics'))
+        return reply({
+          results: [{ question: 1, points: [{ point: 1, quotes: ['request a transit trip plan'], needed: true }] }],
         });
       if (system.startsWith('You check test questions'))
         return reply({
@@ -2858,7 +3207,30 @@ try {
   const savedMixed = await requestApp(listener, 'PUT', `/api/datasets/${mixed.body.id}`, {
     cases: mixed.body.cases.map(item => (item.caseType === 'decline' ? { ...item, sourceEvidence: '' } : item)),
   });
+  assert.equal(mixed.body.rubricCheck.cases.length, 1, 'a generated draft carries its rubric check');
+  assert.deepEqual(
+    mixed.body.rubricCheck.cases[0].points.map(point => [point.supported, point.needed]),
+    [[true, true]],
+  );
   assert.equal(savedMixed.status, 200);
+  assert.equal(savedMixed.body.rubricCheck.cases.length, 1, 'an unchanged question keeps its check after saving');
+  const keptEntry = savedMixed.body.rubricCheck.cases[0];
+  const keptSave = await requestApp(listener, 'PUT', `/api/datasets/${mixed.body.id}`, {
+    cases: savedMixed.body.cases,
+    keptRubricPoints: [
+      { question: keptEntry.question, sourceEvidence: keptEntry.sourceEvidence, point: keptEntry.points[0].point },
+    ],
+  });
+  assert.equal(keptSave.body.rubricCheck.cases[0].points[0].kept, true, 'a kept point is saved with the dataset');
+  const rubricRechecked = await requestApp(listener, 'POST', `/api/datasets/${mixed.body.id}/recheck-rubric`);
+  assert.equal(rubricRechecked.status, 200);
+  assert.notEqual(
+    rubricRechecked.body.rubricCheck.checkedAt,
+    keptSave.body.rubricCheck.checkedAt,
+    'the check ran again',
+  );
+  assert.equal(rubricRechecked.body.rubricCheck.cases[0].points[0].kept, true, 'a Keep choice survives a re-check');
+  assert.equal((await requestApp(listener, 'POST', '/api/datasets/no-such-dataset/recheck-rubric')).status, 404);
   assert.ok(savedMixed.body.coverage);
   assert.equal(
     savedMixed.body.cases.find(item => item.caseType === 'decline').declineKind,
