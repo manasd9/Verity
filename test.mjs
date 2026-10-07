@@ -300,7 +300,13 @@ assert.match(server, /RETRIEVED POLICY SECTIONS/);
 assert.match(server, /store\.chunks/);
 assert.match(js, /'Ready for search' : 'Needs indexing'/);
 assert.match(js, /Try customer chat/);
-assert.match(js, /Create golden dataset/);
+// Sources has one dataset action per source; the header shortcut that guessed a source is gone.
+assert.doesNotMatch(js, /js-start-dataset/);
+assert.match(js, /js-source-dataset" data-id=/);
+assert.match(
+  css,
+  /\.sources-item-actions \.button-secondary:not\(:disabled\):hover \{ border-color: var\(--accent\); background: #fdf1ed; \}/,
+);
 assert.match(js, /gpt-5\.6-luna/);
 assert.match(js, /gpt-5\.6-terra/);
 assert.match(js, /Generating scenarios/);

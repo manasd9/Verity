@@ -263,7 +263,8 @@ function evaluation() {
 function documents() {
   const visibleDocuments = workspace.documents.filter(inSelectedWorkspace);
   const readyDocument = visibleDocuments.find(document => document.retrieval?.status === 'ready');
-  const actions = `${visibleDocuments.length ? button('Create golden dataset', 'primary', 'js-start-dataset') : ''}${workspaceMode === 'local' && readyDocument ? ` ${button('Try customer chat', 'secondary js-start-chat')}` : ''}`;
+  const actions =
+    workspaceMode === 'local' && readyDocument ? button('Try customer chat', 'secondary js-start-chat') : '';
   const sourceState = (text, ready) => `<span class="sources-state ${ready ? '' : 'warn'}">${text}</span>`;
   const datasetButton = id =>
     `<button class="button button-secondary button-small js-source-dataset" data-id="${escapeHtml(id)}" type="button">Generate dataset</button>`;
@@ -975,14 +976,6 @@ function bind(page) {
       activeChatId = null;
       chatDocumentId = allDocuments().find(item => item.retrieval?.status === 'ready')?.id;
       location.hash = 'chat';
-    }),
-  );
-  document.querySelectorAll('.js-start-dataset').forEach(button =>
-    button.addEventListener('click', () => {
-      datasetDocumentId = allDocuments().find(
-        item => inSelectedWorkspace(item) && item.retrieval?.status === 'ready',
-      )?.id;
-      location.hash = 'datasets';
     }),
   );
   document.querySelectorAll('.js-source-dataset').forEach(button =>

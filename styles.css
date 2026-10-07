@@ -253,6 +253,8 @@ a { color: inherit; text-decoration: none; }
 .sources-state.warn { background: #fbefd9; color: #8a5a10; }
 .sources-item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 12px; }
 .sources-item-actions .button { margin-right: 6px; white-space: nowrap; }
+.sources-item-actions .button-secondary { border-color: #f0b7a9; }
+.sources-item-actions .button-secondary:not(:disabled):hover { border-color: var(--accent); background: #fdf1ed; }
 .sources-quiet { padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .sources-quiet:hover { background: var(--soft); color: var(--ink); }
 .sources-quiet.danger:hover { background: #fbe9e7; color: var(--danger); }
