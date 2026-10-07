@@ -1163,10 +1163,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       }));
       const markup = coverageMarkup({ sections, covered: 2, total: 9, unmatched: [7], unit: 'sections' });
       assert.match(markup, /Covered 2 of 9 sections\./);
-      assert.match(
-        markup,
-        /No questions yet: 3 Section &lt;3&gt;; 4 Section &lt;4&gt;; 5 Section &lt;5&gt;; 6 Section &lt;6&gt;; 7 Section &lt;7&gt;; 8 Section &lt;8&gt;, and 1 more\./,
-      );
+      assert.match(markup, /Covered 2 of 9 sections\.<\/b> 7 sections have no questions yet\. #7/);
       assert.match(markup, /#7 could not be matched to a section/);
       assert.doesNotMatch(markup, /<3>/, 'titles are escaped');
       assert.match(
@@ -1178,6 +1175,24 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
           unit: 'pages',
         }),
         /Covered 1 of 1 page\.<\/b> Every page has at least one question\./,
+      );
+      assert.match(
+        coverageMarkup({
+          sections: [
+            { title: 'A', cases: [1] },
+            { title: 'B', cases: [] },
+          ],
+          covered: 1,
+          total: 2,
+          unmatched: [],
+          unit: 'sections',
+        }),
+        /1 section has no questions yet\./,
+      );
+      assert.doesNotMatch(
+        markup.split('<details>')[0],
+        /Section &lt;3&gt;/,
+        'section names appear only under Show every section',
       );
       assert.equal(coverageMarkup(null), '');
       assert.equal(coverageMarkup({ sections: [], covered: 0, total: 0, unmatched: [] }), '');

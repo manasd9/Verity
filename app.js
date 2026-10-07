@@ -384,13 +384,7 @@ function coverageMarkup(coverage) {
   const [one, many] = coverage.unit === 'pages' ? ['page', 'pages'] : ['section', 'sections'];
   const untested = coverage.sections.filter(section => !section.cases.length);
   const summary = untested.length
-    ? 'No questions yet: ' +
-      untested
-        .slice(0, 6)
-        .map(section => section.title)
-        .join('; ') +
-      (untested.length > 6 ? ', and ' + (untested.length - 6) + ' more' : '') +
-      '.'
+    ? untested.length + ' ' + (untested.length === 1 ? one + ' has' : many + ' have') + ' no questions yet.'
     : 'Every ' + one + ' has at least one question.'; // Plain text; escaped below.
   const unmatched = coverage.unmatched?.length
     ? ` ${coverage.unmatched.map(number => `#${number}`).join(', ')} could not be matched to a ${one}; its evidence may have been edited.`
