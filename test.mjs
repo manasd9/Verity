@@ -1309,9 +1309,15 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     }
     // Review page passage boxes: Passage 1 keeps its field names; one passage shows at a time behind a switch.
     {
-      const passageCode = topLevel(js, 'MAX_REVIEW_PASSAGES', 'casePassages', 'reviewPassagesMarkup');
-      const { casePassages, reviewPassagesMarkup } = new Function(
-        `${helpers}\n${passageCode}; return { casePassages, reviewPassagesMarkup };`,
+      const passageCode = topLevel(
+        js,
+        'MAX_REVIEW_PASSAGES',
+        'casePassages',
+        'reviewPassagesMarkup',
+        'evidenceSearchNote',
+      );
+      const { casePassages, reviewPassagesMarkup, evidenceSearchNote } = new Function(
+        `${helpers}\n${passageCode}; return { casePassages, reviewPassagesMarkup, evidenceSearchNote };`,
       )();
       assert.deepEqual(casePassages({ sourceEvidence: 'A', sourceUrl: 'https://x.example/a' }), [
         { text: 'A', sourceUrl: 'https://x.example/a' },
@@ -1403,6 +1409,13 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
         'a lone read-only passage needs no switch',
       );
 
+      assert.equal(evidenceSearchNote({}), '');
+      assert.equal(evidenceSearchNote({ evidenceSearchUnavailable: true, status: 'approved' }), '');
+      assert.match(
+        evidenceSearchNote({ evidenceSearchUnavailable: true, status: 'draft' }),
+        /^<p id="evidence-search-note" class="rubric-note" role="note"><b>Evidence search unavailable\.<\/b> /,
+      );
+      assert.match(js, /\$\{evidenceSearchNote\(dataset\)\}\$\{declineCheckNote\(dataset\)\}/);
       // Should-decline cards keep their single Nearby passage box; everything else gets the passage boxes.
       assert.match(
         js,

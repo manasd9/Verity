@@ -543,6 +543,12 @@ function reviewPassagesMarkup(passages, index, editable, website, active = 0) {
     .join('');
   return `<div id="review-passages-${index}" class="field full review-passages"><div class="review-passages-head"><span class="review-passages-label">Source evidence</span>${switcher}</div>${panes}</div>`;
 }
+// Set on a draft generated without the evidence search; its questions then carry a single passage each.
+function evidenceSearchNote(dataset) {
+  return dataset.evidenceSearchUnavailable && dataset.status !== 'approved'
+    ? '<p id="evidence-search-note" class="rubric-note" role="note"><b>Evidence search unavailable.</b> Verity could not search the source when this draft was generated, so each question has one passage. Add passages by hand where an answer needs more.</p>'
+    : '';
+}
 function datasetReview(dataset) {
   const editable = dataset.status !== 'approved';
   if (reviewScenarioDatasetId !== dataset.id) {
@@ -568,7 +574,7 @@ function datasetReview(dataset) {
   const actions = editable
     ? `<div class="button-row"><button class="button button-secondary" type="submit">Save changes</button><button class="button button-primary js-approve" data-id="${escapeHtml(dataset.id)}" type="button">Save & approve</button></div><p id="review-status" class="help" aria-live="polite">Write or verify the expected answer and evidence for every scenario before approving.</p>`
     : `<div class="review-footer"><p class="help">This benchmark is approved and ready to evaluate.</p><div class="button-row">${button('Go to evaluation', 'primary', 'js-go-evaluation')}</div></div>`;
-  return `${header('Review golden dataset', `${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'secondary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${declineCheckNote(dataset)}${rubricCheckNote(dataset, editable)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
+  return `${header('Review golden dataset', `${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'} generated from your policy. Check the source evidence before approving.`, button('Back to datasets', 'secondary', 'js-close-review'))}<form id="dataset-review-form" class="review-layout"><nav class="panel review-list" aria-label="Scenarios"><div class="review-list-head"><strong>Scenarios</strong><span>${dataset.cases.length}</span></div><div class="review-list-scroll">${list}</div>${editable ? '<button class="button button-secondary js-add-scenario" type="button">+ Add scenario</button>' : ''}</nav><section class="panel card-pad review-detail">${evidenceSearchNote(dataset)}${declineCheckNote(dataset)}${rubricCheckNote(dataset, editable)}${coverageMarkup(dataset.coverage)}${pager}${cases}<div class="review-actions">${actions}</div></section></form>`;
 }
 
 function gapDiagnosisMarkup(result) {
