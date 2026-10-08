@@ -1669,6 +1669,7 @@ async function searchEvidence({ source, passages, passageVectors, connection, co
   } catch {
     return null;
   }
+  if (queryVectors.length !== searchable.length) return null;
   const candidatesFor = new Map(
     searchable.map((item, index) => {
       const origin = passages.findIndex(
