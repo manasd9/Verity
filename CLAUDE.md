@@ -9,3 +9,17 @@ Local-only tool that evaluates FlexAgent agents (Node 24, http://127.0.0.1:4173)
 - **Tests:** `test.mjs` reaches helpers still inside `app.js` through `topLevel(js, name)`; about 130 checks match exact source text, so a pure rewording can fail them.
 - **Data:** `data/store.json` (gitignored) holds client data and encrypted keys; read it with a script that prints only the fields you need.
 - **FlexAgent backend:** `C:\Users\mdani\Documents\MATP\matp-backend-staging`, read-only reference.
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown under `.scratch/<feature>/` (gitignored). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default labels, recorded as a `Status:` line in each ticket file. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
