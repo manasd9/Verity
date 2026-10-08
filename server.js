@@ -1667,11 +1667,14 @@ function quotedCandidates(candidates, checked) {
 }
 // Searches every written question's own source and lets the rubric check choose its evidence. Returns the cases with
 // their evidence set and the rubric check over it, or null when the search cannot run (the caller falls back).
+// A draft says evidenceSearch: 'used' only when the search ran for every single-turn question it wrote, so any
+// failure (the passages or questions cannot be embedded, a question's written-from passage is not found, or the
+// rubric check that chooses the candidates fails) makes the whole draft fall back, never just one question.
 async function searchEvidence({ source, passages, passageVectors, connection, control, cases, signal }) {
   const vectors = await passageVectors;
   if (vectors?.length !== passages.length) return null;
   const searchable = cases.filter(item => !item.turns.length);
-  if (!searchable.length) return { cases };
+  if (!searchable.length) return null;
   let queryVectors;
   try {
     queryVectors = await embed(connection, searchable.map(evidenceQuery), EVIDENCE_SEARCH_STEP);
@@ -1679,13 +1682,15 @@ async function searchEvidence({ source, passages, passageVectors, connection, co
     return null;
   }
   if (queryVectors.length !== searchable.length) return null;
+  const origins = searchable.map(item =>
+    passages.findIndex(passage => passage.text === item.sourceEvidence && passage.sourceUrl === item.sourceUrl),
+  );
+  if (origins.includes(-1)) return null;
   const candidatesFor = new Map(
-    searchable.map((item, index) => {
-      const origin = passages.findIndex(
-        passage => passage.text === item.sourceEvidence && passage.sourceUrl === item.sourceUrl,
-      );
-      return [item, origin < 0 ? null : evidenceCandidates(source, passages, vectors, origin, queryVectors[index])];
-    }),
+    searchable.map((item, index) => [
+      item,
+      evidenceCandidates(source, passages, vectors, origins[index], queryVectors[index]),
+    ]),
   );
   const withPassage1 = cases.map(item => {
     const candidates = candidatesFor.get(item);
@@ -1701,9 +1706,9 @@ async function searchEvidence({ source, passages, passageVectors, connection, co
     checks = applyRubricCheck(entries, raw).map((checked, index) =>
       narrowPassageCheck(checked, quotedCandidates(entries[index].passages, checked)),
     );
-  } catch (error) {
-    // Without the check nothing chose the other candidates, so each question keeps Passage 1.
-    return { cases: withPassage1, rubricCheck: { error: error.message } };
+  } catch {
+    // Without the check nothing chose the evidence; the caller generates the draft as before.
+    return null;
   }
   const checkFor = new Map(entries.map((entry, index) => [entry.item, checks[index]]));
   return {
@@ -2574,7 +2579,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const answerCases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!answerCases.length)
       throw new Error('The control model did not cite any valid source passages. Please try again.');
-    // Without the search (no OpenAI connection, or embedding failed) the draft is generated as before.
+    // Without the search (no OpenAI connection, or any part of the search failed) the draft is generated as before.
     const todaysRubricCheck = () => {
       const rubricEntries = rubricCheckEntries(answerCases, sources);
       return rubricEntries.length

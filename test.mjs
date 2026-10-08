@@ -4419,6 +4419,8 @@ try {
     };
     const embeddingInputs = [];
     let failEmbeddings = false;
+    let failQueryEmbedding = false;
+    let failNextRubricCheck = false;
     const rubricPrompts = [];
     let rubricReply;
     let websiteQuestions = [];
@@ -4430,6 +4432,8 @@ try {
       if (String(url).endsWith('/embeddings')) {
         if (failEmbeddings) return new Response('embeddings down', { status: 500 });
         const input = JSON.parse(options.body).input;
+        if (failQueryEmbedding && input.some(text => text.startsWith('Can I bring pets?')))
+          return new Response('embeddings down', { status: 500 });
         embeddingInputs.push(input);
         return json({
           data: input.map(text => ({ embedding: vectorFor(text) })),
@@ -4458,6 +4462,10 @@ try {
           });
         if (system.startsWith('You check test rubrics')) {
           rubricPrompts.push(body.messages[1].content);
+          if (failNextRubricCheck) {
+            failNextRubricCheck = false;
+            return chat({ unexpected: true });
+          }
           return chat(rubricReply);
         }
       }
@@ -4649,6 +4657,59 @@ try {
         ],
         'a website passage from another page keeps its own page link',
       );
+
+      // A draft claims the search only when it ran for every written question. When the rubric check that chooses
+      // the candidates fails, or the questions cannot be embedded, the draft is generated as before and says so.
+      const plainReply = {
+        results: [
+          {
+            question: 1,
+            points: [1, 2, 3, 4].map(point => ({
+              point,
+              quotes: ['Pets are allowed in ground-floor rooms only'],
+              needed: true,
+            })),
+          },
+          { question: 2, points: [{ point: 1, quotes: ['Parking is valet only'], needed: true }] },
+        ],
+      };
+      const singlePassages = draft =>
+        draft.body.cases
+          .filter(item => item.caseType !== 'decline')
+          .map(item => [item.sourceEvidence, item.extraPassages]);
+      const asToday = `PREVIOUS PASSAGE: ${blocks[0]}
+EVIDENCE: ${blocks[1]}
+NEXT PASSAGE: ${blocks[2]}`;
+      rubricReply = plainReply;
+      failNextRubricCheck = true;
+      const checkFailed = await generate(openai.body.id);
+      assert.equal(checkFailed.status, 201, JSON.stringify(checkFailed.body));
+      assert.equal(checkFailed.body.evidenceSearch, 'unavailable', 'a failed check during the search is not a search');
+      assert.deepEqual(
+        singlePassages(checkFailed),
+        [
+          [blocks[1], undefined],
+          [blocks[10], undefined],
+        ],
+        'each question keeps the single passage it was written from, not the merged one',
+      );
+      assert.ok(rubricPrompts.at(-1).includes(asToday), 'the rubric check runs again as today');
+      assert.equal(checkFailed.body.rubricCheck.cases?.length, 2, 'and its results are kept');
+
+      failQueryEmbedding = true;
+      const queryFailed = await generate(openai.body.id);
+      failQueryEmbedding = false;
+      assert.equal(queryFailed.status, 201, JSON.stringify(queryFailed.body));
+      assert.equal(
+        queryFailed.body.evidenceSearch,
+        'unavailable',
+        'questions that cannot be embedded are not searched',
+      );
+      assert.deepEqual(singlePassages(queryFailed), [
+        [blocks[1], undefined],
+        [blocks[10], undefined],
+      ]);
+      assert.ok(rubricPrompts.at(-1).includes(asToday));
 
       // Fallback: when the passages cannot be embedded, the draft is generated as before and says so.
       failEmbeddings = true;
