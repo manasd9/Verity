@@ -1484,7 +1484,7 @@ function rubricCheckMessages(entries) {
     ? `copy the words from its EVIDENCE, PREVIOUS PASSAGE or NEXT PASSAGE that state the point, ${quoting} ${consecutive} ${needed} Return JSON only: ${plainReply}`
     : !neighbours
       ? `copy the words from its numbered PASSAGES that state the point, ${quoting} Give each quote with the number of the passage it is in. ${separate} ${needed} Return JSON only: ${numberedReply}`
-      : `copy the words from its passages that state the point, ${quoting} For a question with numbered PASSAGES, give each quote with the number of the passage it is in, as {"passage":1,"quote":""}. ${separate} For a question with EVIDENCE, PREVIOUS PASSAGE and NEXT PASSAGE, give plain quotes. ${consecutive} ${needed} Return JSON only, for example: ${plainReply}`;
+      : `copy the words from its passages that state the point, ${quoting} For a question with numbered PASSAGES, give each quote with the number of the passage it is in, as {"passage":1,"quote":""}. ${separate} For a question with EVIDENCE, PREVIOUS PASSAGE and NEXT PASSAGE, give plain quotes. ${consecutive} ${needed} Return JSON only, for example: {"results":[{"question":1,"points":[{"point":1,"quotes":[{"passage":1,"quote":""}],"needed":true}]},{"question":2,"points":[{"point":1,"quotes":[""],"needed":true}]}]}`;
   return [
     { role: 'system', content: `You check test rubrics against their source evidence. ${UNTRUSTED_SOURCE_NOTICE}` },
     {
@@ -1511,16 +1511,19 @@ function passageCheck({ item, passages }, result) {
       const answer = result.points.find(entry => entry?.point === at + 1);
       if (
         !Array.isArray(answer?.quotes) ||
-        !answer.quotes.every(quote => Number.isInteger(quote?.passage) && typeof quote.quote === 'string') ||
+        !answer.quotes.every(quote => typeof quote === 'string' || typeof quote?.quote === 'string') ||
         typeof answer.needed !== 'boolean'
       )
         throw new Error(
-          'The control model must return numbered quotes and a needed flag for every required point in the rubric check.',
+          'The control model must return quotes and a needed flag for every required point in the rubric check.',
         );
+      // A quote that names no passage cannot be verified against one, so it is not support.
       const quotes = answer.quotes
-        .map(quote => ({ passage: quote.passage, text: trimQuote(quote.quote) }))
+        .map(quote => ({ passage: quote?.passage, text: trimQuote(quote?.quote ?? quote) }))
         .filter(quote => quote.text.length >= 8);
-      const found = quotes.length > 0 && quotes.every(quote => texts[quote.passage - 1]?.includes(quote.text));
+      const found =
+        quotes.length > 0 &&
+        quotes.every(quote => Number.isInteger(quote.passage) && texts[quote.passage - 1]?.includes(quote.text));
       return {
         point,
         supported: found,

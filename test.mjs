@@ -4001,6 +4001,48 @@ try {
           [true, true],
         );
         assert.equal(embeddingCalls, 0, 'no re-check searched');
+
+        // A draft can mix questions with several passages and older questions with one.
+        const onePassage = {
+          ...petsCase,
+          question: 'Where do I park?',
+          expectedAnswer: 'Valet only, $25 a night.',
+          requiredPoints: ['Valet only'],
+          sourceEvidence: policyText.slice(policyText.indexOf('Parking is valet')),
+        };
+        await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', { cases: [threePassages, onePassage] });
+        rubricReply = {
+          results: [
+            {
+              question: 1,
+              points: [
+                { point: 1, quotes: ['Pets are allowed in ground-floor rooms only'], needed: true },
+                { point: 2, quotes: [{ passage: 2, quote: 'Pets must be on a lead in shared areas' }], needed: true },
+              ],
+            },
+            { question: 2, points: [{ point: 1, quotes: ['Parking is valet only'], needed: true }] },
+          ],
+        };
+        const mixedCheck = await recheck();
+        const mixedPrompt = rubricCalls.at(-1);
+        assert.match(mixedPrompt, /QUESTION 1: Can I bring my dog\?[\s\S]*PASSAGE 3: Guests[\s\S]*QUESTION 2/);
+        assert.match(mixedPrompt, /QUESTION 2: Where do I park\?[\s\S]*PREVIOUS PASSAGE: [\s\S]*EVIDENCE: Parking/);
+        assert.match(mixedPrompt, /"quotes":\[\{"passage":1,"quote":""\}\]/, 'both reply shapes are shown');
+        assert.match(mixedPrompt, /"quotes":\[""\]/);
+        const [dogCheck, parkCheck] = mixedCheck.body.rubricCheck.cases;
+        assert.deepEqual(
+          dogCheck.points.map(point => [point.supported, point.passages]),
+          [
+            [false, []],
+            [true, [2]],
+          ],
+          'a quote that names no passage is not support',
+        );
+        assert.deepEqual(
+          parkCheck.points.map(point => [point.supported, point.startsBefore, point.continues]),
+          [[true, false, false]],
+          'a one-passage question keeps its previous and next passage notes',
+        );
       } finally {
         globalThis.fetch = passagesFetch;
       }
