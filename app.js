@@ -400,9 +400,15 @@ function coverageMarkup(coverage) {
 // Rubric check: whether each required point is backed by the evidence and asked by the question. Results apply only
 // while the question and its evidence are unchanged; an edited point simply has no check.
 function rubricCheckFor(dataset, item) {
-  return dataset.rubricCheck?.cases?.find(
-    entry => entry.question === item.question && entry.sourceEvidence === item.sourceEvidence,
-  );
+  return dataset.rubricCheck?.cases?.find(entry => rubricCheckKey(entry) === rubricCheckKey(item));
+}
+// The evidence is every passage's text, in order, so an edited, reordered or removed passage loses the check.
+function rubricCheckKey(record) {
+  return JSON.stringify([
+    record.question,
+    record.sourceEvidence,
+    ...(record.extraPassages || []).map(passage => passage.text),
+  ]);
 }
 // Checks saved before 7 October 2026 call this flag asked.
 function pointNeeded(point) {
@@ -2265,7 +2271,12 @@ function keptRubricPoints(dataset) {
   return (dataset.rubricCheck?.cases || []).flatMap(entry =>
     entry.points
       .filter(point => point.kept)
-      .map(point => ({ question: entry.question, sourceEvidence: entry.sourceEvidence, point: point.point })),
+      .map(point => ({
+        question: entry.question,
+        sourceEvidence: entry.sourceEvidence,
+        ...(entry.extraPassages ? { extraPassages: entry.extraPassages } : {}),
+        point: point.point,
+      })),
   );
 }
 // Remove and Keep change only the rubric panel, the note and the list marker, so unsaved edits elsewhere survive.

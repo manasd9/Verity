@@ -1127,10 +1127,40 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
         'rubricWarningCount',
         'rubricCheckMarkup',
         'rubricCheckNote',
+        'rubricCheckKey',
+        'keptRubricPoints',
       );
-      const { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber } = new Function(
-        `${helpers}\n${rubricCode}; return { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber };`,
+      const {
+        rubricCheckFor,
+        rubricWarningCount,
+        rubricCheckMarkup,
+        rubricCheckNote,
+        reviewListNumber,
+        keptRubricPoints,
+      } = new Function(
+        `${helpers}\n${rubricCode}; return { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber, keptRubricPoints };`,
       )();
+      // A check over several passages belongs to the question with exactly those passages, in that order.
+      {
+        const extraPassages = [{ text: 'P2' }, { text: 'P3', sourceUrl: 'https://hotel.example/rules' }];
+        const multi = {
+          question: 'Q',
+          sourceEvidence: 'P1',
+          extraPassages,
+          points: [{ point: 'Lead', supported: true, passages: [2], needed: true, quote: 'on a lead', kept: true }],
+        };
+        const withMulti = { rubricCheck: { cases: [multi] } };
+        assert.equal(rubricCheckFor(withMulti, { question: 'Q', sourceEvidence: 'P1', extraPassages }), multi);
+        for (const item of [
+          { question: 'Q', sourceEvidence: 'P1' },
+          { question: 'Q', sourceEvidence: 'P1', extraPassages: [...extraPassages].reverse() },
+          { question: 'Q', sourceEvidence: 'P1', extraPassages: [{ text: 'P2 edited' }, extraPassages[1]] },
+        ])
+          assert.equal(rubricCheckFor(withMulti, item), undefined, 'changed passages have no check');
+        assert.deepEqual(keptRubricPoints(withMulti), [
+          { question: 'Q', sourceEvidence: 'P1', extraPassages, point: 'Lead' },
+        ]);
+      }
       const entry = {
         question: 'Q <1>',
         sourceEvidence: 'E',
@@ -3798,6 +3828,135 @@ try {
       [[{ text: 'Pets must be on a lead in shared areas.' }], undefined],
       'a hand-written turn keeps its passages, and a one-passage turn keeps its old shape',
     );
+
+    // The rubric check quotes required points from any of a question's passages, each quote verified against the
+    // passage it names. Re-check rubric checks only the passages on the question and never searches.
+    {
+      const rubricCalls = [];
+      let embeddingCalls = 0;
+      let rubricReply;
+      const passagesFetch = globalThis.fetch;
+      globalThis.fetch = async (url, options = {}) => {
+        if (String(url).endsWith('/embeddings')) embeddingCalls += 1;
+        if (String(url).endsWith('/chat/completions')) {
+          const body = JSON.parse(options.body);
+          if (body.messages[0].content.startsWith('You check test rubrics')) {
+            rubricCalls.push(body.messages[1].content);
+            return new Response(
+              JSON.stringify({ choices: [{ message: { content: JSON.stringify(rubricReply) } }], usage: mockUsage }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+        }
+        return passagesFetch(url, options);
+      };
+      const quoted = (...points) => ({
+        results: [{ question: 1, points: points.map((quotes, at) => ({ point: at + 1, quotes, needed: true })) }],
+      });
+      const recheck = () => requestApp(listener, 'POST', '/api/datasets/dataset_passages/recheck-rubric');
+      try {
+        assert.equal(
+          (await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', { cases: [threePassages] })).status,
+          200,
+        );
+        rubricReply = quoted(
+          [{ passage: 1, quote: 'Pets are allowed in ground-floor rooms only' }],
+          [{ passage: 2, quote: 'Pets must be on a lead in shared areas' }],
+        );
+        const checked = await recheck();
+        assert.equal(checked.status, 200);
+        assert.equal(embeddingCalls, 0, 'Re-check rubric makes no search call');
+        assert.match(rubricCalls[0], /PASSAGE 1: Pets are allowed in ground-floor rooms only/);
+        assert.match(rubricCalls[0], /PASSAGE 2: Pets must be on a lead in shared areas\./);
+        assert.match(rubricCalls[0], /PASSAGE 3: Guests are responsible for any damage their pets cause\./);
+        assert.doesNotMatch(rubricCalls[0], /PREVIOUS PASSAGE|NEXT PASSAGE|consecutive/);
+        const [entry] = checked.body.rubricCheck.cases;
+        assert.deepEqual(
+          entry.points.map(point => [point.point, point.supported, point.passages]),
+          [
+            ['Ground-floor rooms only', true, [1]],
+            ['On a lead in shared areas', true, [2]],
+          ],
+          'a point stated in Passage 2 is found there, not flagged "Not in the evidence"',
+        );
+        assert.ok(
+          entry.points.every(point => !('startsBefore' in point) && !('continues' in point)),
+          'multi-passage points have two outcomes: found in a passage, or not in the evidence',
+        );
+        assert.equal(entry.sourceEvidence, petsCase.sourceEvidence);
+        assert.deepEqual(entry.extraPassages, threePassages.extraPassages, 'the check is keyed by every passage');
+
+        rubricReply = quoted(
+          [{ passage: 1, quote: 'for a $30 fee per night. Pets must be on a lead' }],
+          [{ passage: 3, quote: 'Pets must be on a lead in shared areas' }],
+        );
+        const misquoted = await recheck();
+        assert.deepEqual(
+          misquoted.body.rubricCheck.cases[0].points.map(point => [point.supported, point.quote]),
+          [
+            [false, ''],
+            [false, ''],
+          ],
+          'a quote across two passages, or in a passage other than the one it names, is not support',
+        );
+
+        const flagged = misquoted.body.rubricCheck.cases[0];
+        const keptSave = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+          cases: [threePassages],
+          keptRubricPoints: [
+            {
+              question: flagged.question,
+              sourceEvidence: flagged.sourceEvidence,
+              extraPassages: flagged.extraPassages,
+              point: 'On a lead in shared areas',
+            },
+          ],
+        });
+        assert.deepEqual(
+          keptSave.body.rubricCheck.cases[0].points.map(point => Boolean(point.kept)),
+          [false, true],
+          'a Keep choice names the question and its passages',
+        );
+        const keptRechecked = await recheck();
+        assert.deepEqual(
+          keptRechecked.body.rubricCheck.cases[0].points.map(point => Boolean(point.kept)),
+          [false, true],
+          'a Keep choice survives a re-check',
+        );
+
+        for (const [extraPassages, why] of [
+          [[{ text: 'Pets must be on a lead in all shared areas.' }, threePassages.extraPassages[1]], 'edited'],
+          [[...threePassages.extraPassages].reverse(), 'reordered'],
+          [[threePassages.extraPassages[0]], 'removed'],
+        ]) {
+          const changed = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+            cases: [{ ...threePassages, extraPassages }],
+          });
+          assert.equal(changed.status, 200);
+          assert.deepEqual(changed.body.rubricCheck.cases, [], `a check is dropped when a passage is ${why}`);
+          await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', { cases: [threePassages] });
+          await recheck();
+        }
+
+        // After a passage is removed, Re-check rubric checks the kept passages only.
+        await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+          cases: [{ ...threePassages, extraPassages: [threePassages.extraPassages[0]] }],
+        });
+        rubricReply = quoted(
+          [{ passage: 1, quote: 'Pets are allowed in ground-floor rooms only' }],
+          [{ passage: 2, quote: 'Pets must be on a lead in shared areas' }],
+        );
+        const trimmed = await recheck();
+        assert.doesNotMatch(rubricCalls.at(-1), /PASSAGE 3|Guests are responsible/);
+        assert.deepEqual(
+          trimmed.body.rubricCheck.cases[0].points.map(point => point.supported),
+          [true, true],
+        );
+        assert.equal(embeddingCalls, 0, 'no re-check searched');
+      } finally {
+        globalThis.fetch = passagesFetch;
+      }
+    }
 
     // Website passages may come from different pages; each keeps its own link and must be an excerpt of that page.
     const siteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));

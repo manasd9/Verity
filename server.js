@@ -1436,10 +1436,13 @@ async function checkDeclineCases(store, source, control, cases, signal) {
 // Rubric check: a second look at each generated question. For every required point the model quotes the words in
 // the evidence (or the passage after it) that state the point, and says whether the question asks for it. Verity
 // verifies each quote by text match, so support cannot be invented. It only flags; nothing is removed.
+// An entry is either { item, passages } (the passages to check, Passage 1 first, each { text, sourceUrl? }) or, for a
+// question with a single passage, { item, previous, next } with the passages around it in the source.
 function rubricCheckEntries(cases, sources) {
   return cases
     .filter(item => item.caseType !== 'decline' && !item.turns?.length && item.requiredPoints.length)
     .map(item => {
+      if (item.extraPassages?.length) return { item, passages: evidencePassages(item) };
       const at = sources.findIndex(source => source.text === item.sourceEvidence);
       // Passages are cut every 500 characters, so a rule can start in the passage before the evidence or end after it.
       const neighbour = offset => {
@@ -1451,22 +1454,42 @@ function rubricCheckEntries(cases, sources) {
 }
 function rubricCheckMessages(entries) {
   const listing = entries
-    .map(({ item, previous, next }, index) =>
+    .map(({ item, passages, previous, next }, index) =>
       [
         `QUESTION ${index + 1}: ${item.question}`,
         `EXPECTED ANSWER: ${item.expectedAnswer}`,
         ...item.requiredPoints.map((point, at) => `REQUIRED POINT ${index + 1}.${at + 1}: ${point}`),
-        `PREVIOUS PASSAGE: ${previous || '(none)'}`,
-        `EVIDENCE: ${item.sourceEvidence}`,
-        `NEXT PASSAGE: ${next || '(none)'}`,
+        ...(passages
+          ? passages.map((passage, at) => `PASSAGE ${at + 1}: ${passage.text}`)
+          : [
+              `PREVIOUS PASSAGE: ${previous || '(none)'}`,
+              `EVIDENCE: ${item.sourceEvidence}`,
+              `NEXT PASSAGE: ${next || '(none)'}`,
+            ]),
       ].join('\n'),
     )
     .join('\n\n');
+  const quoting =
+    'exactly as written and without ellipses: one quote, or several when the point combines parts stated in different places (an empty list when nothing states it).';
+  const needed =
+    'Then say whether the point is needed to handle this request correctly: true for information the customer asked for and for rules the agent must follow in this situation, false only for extra information the request does not need.';
+  const consecutive = 'The three passages are consecutive, so a quote may run from one into the next.';
+  const separate = 'Each numbered passage is a separate part of the source, so a quote stays within one passage.';
+  const plainReply = '{"results":[{"question":1,"points":[{"point":1,"quotes":[""],"needed":true}]}]}';
+  const numberedReply =
+    '{"results":[{"question":1,"points":[{"point":1,"quotes":[{"passage":1,"quote":""}],"needed":true}]}]}';
+  const numbered = entries.some(entry => entry.passages);
+  const neighbours = entries.some(entry => !entry.passages);
+  const instructions = !numbered
+    ? `copy the words from its EVIDENCE, PREVIOUS PASSAGE or NEXT PASSAGE that state the point, ${quoting} ${consecutive} ${needed} Return JSON only: ${plainReply}`
+    : !neighbours
+      ? `copy the words from its numbered PASSAGES that state the point, ${quoting} Give each quote with the number of the passage it is in. ${separate} ${needed} Return JSON only: ${numberedReply}`
+      : `copy the words from its passages that state the point, ${quoting} For a question with numbered PASSAGES, give each quote with the number of the passage it is in, as {"passage":1,"quote":""}. ${separate} For a question with EVIDENCE, PREVIOUS PASSAGE and NEXT PASSAGE, give plain quotes. ${consecutive} ${needed} Return JSON only, for example: ${plainReply}`;
   return [
     { role: 'system', content: `You check test rubrics against their source evidence. ${UNTRUSTED_SOURCE_NOTICE}` },
     {
       role: 'user',
-      content: `For every required point of every question: copy the words from its EVIDENCE, PREVIOUS PASSAGE or NEXT PASSAGE that state the point, exactly as written and without ellipses: one quote, or several when the point combines parts stated in different places (an empty list when nothing states it). The three passages are consecutive, so a quote may run from one into the next. Then say whether the point is needed to handle this request correctly: true for information the customer asked for and for rules the agent must follow in this situation, false only for extra information the request does not need. Return JSON only: {"results":[{"question":1,"points":[{"point":1,"quotes":[""],"needed":true}]}]}\n\n${fenceUntrusted('QUESTIONS, RUBRICS AND EVIDENCE', listing)}`,
+      content: `For every required point of every question: ${instructions}\n\n${fenceUntrusted('QUESTIONS, RUBRICS AND EVIDENCE', listing)}`,
     },
   ];
 }
@@ -1475,13 +1498,48 @@ const trimQuote = quote =>
     .trim()
     .replace(/^["'“”‘’…]+|["'“”‘’…]+$/g, '')
     .trim();
+// Over a passage list each quote is verified against the passage it names, never across two passages. A point is
+// supported when every quote is found; `passages` lists the numbers of the passages it was found in. The result is
+// keyed by the passages checked, so checking the same reply again over fewer passages re-keys and re-verifies it.
+function passageCheck({ item, passages }, result) {
+  const texts = passages.map(passage => squash(passage.text).trim());
+  return {
+    question: item.question,
+    sourceEvidence: passages[0].text,
+    ...(passages.length > 1 ? { extraPassages: passages.slice(1) } : {}),
+    points: item.requiredPoints.map((point, at) => {
+      const answer = result.points.find(entry => entry?.point === at + 1);
+      if (
+        !Array.isArray(answer?.quotes) ||
+        !answer.quotes.every(quote => Number.isInteger(quote?.passage) && typeof quote.quote === 'string') ||
+        typeof answer.needed !== 'boolean'
+      )
+        throw new Error(
+          'The control model must return numbered quotes and a needed flag for every required point in the rubric check.',
+        );
+      const quotes = answer.quotes
+        .map(quote => ({ passage: quote.passage, text: trimQuote(quote.quote) }))
+        .filter(quote => quote.text.length >= 8);
+      const found = quotes.length > 0 && quotes.every(quote => texts[quote.passage - 1]?.includes(quote.text));
+      return {
+        point,
+        supported: found,
+        quote: found ? quotes.map(quote => quote.text).join(' … ') : '',
+        passages: found ? [...new Set(quotes.map(quote => quote.passage))].sort((a, b) => a - b) : [],
+        needed: answer.needed,
+      };
+    }),
+  };
+}
 function applyRubricCheck(entries, raw) {
   const results = JSON.parse(raw).results;
   if (!Array.isArray(results)) throw new Error('The control model did not return a rubric check.');
-  return entries.map(({ item, previous, next }, index) => {
-    const result = results.find(entry => entry?.question === index + 1);
+  return entries.map((entry, index) => {
+    const { item, previous, next } = entry;
+    const result = results.find(candidate => candidate?.question === index + 1);
     if (!Array.isArray(result?.points))
       throw new Error('The control model must return a rubric check for every question.');
+    if (entry.passages) return passageCheck(entry, result);
     // The three passages are consecutive cuts of the document, so they are searched as one text: a quote can
     // cross a cut, and a point can combine parts from several passages.
     const preceding = squash(previous).trim();
@@ -1525,16 +1583,29 @@ function applyRubricCheck(entries, raw) {
     };
   });
 }
+// A rubric-check result belongs to a question and its evidence: the question and every passage's text, in order.
+// Anything malformed has no key and matches nothing.
+function rubricCheckKey(record) {
+  const extra = record?.extraPassages ?? [];
+  if (
+    typeof record?.question !== 'string' ||
+    typeof record.sourceEvidence !== 'string' ||
+    !Array.isArray(extra) ||
+    !extra.every(passage => typeof passage?.text === 'string')
+  )
+    return null;
+  return JSON.stringify([record.question, record.sourceEvidence, ...extra.map(passage => passage.text)]);
+}
+function sameRubricKey(a, b) {
+  const key = rubricCheckKey(a);
+  return key !== null && key === rubricCheckKey(b);
+}
 // Points a reviewer chose to keep stop counting as needing a look. Unknown or malformed entries are ignored.
 function markKeptRubricPoints(check, kept) {
   if (!check?.cases || !Array.isArray(kept)) return check;
-  const text = value => (typeof value === 'string' ? value : null);
   for (const choice of kept) {
-    const entry = check.cases.find(
-      candidate =>
-        candidate.question === text(choice?.question) && candidate.sourceEvidence === text(choice?.sourceEvidence),
-    );
-    const point = entry?.points.find(candidate => candidate.point === text(choice?.point));
+    const entry = check.cases.find(candidate => sameRubricKey(candidate, choice));
+    const point = entry?.points.find(candidate => candidate.point === choice.point);
     if (point) point.kept = true;
   }
   return check;
@@ -1546,9 +1617,7 @@ function keepRubricCheck(check, cases) {
     ...check,
     cases: check.cases
       .map(entry => {
-        const item = cases.find(
-          candidate => candidate.question === entry.question && candidate.sourceEvidence === entry.sourceEvidence,
-        );
+        const item = cases.find(candidate => sameRubricKey(candidate, entry));
         return item && { ...entry, points: entry.points.filter(point => item.requiredPoints.includes(point.point)) };
       })
       .filter(entry => entry?.points.length),
@@ -2437,7 +2506,12 @@ app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
     const kept = (dataset.rubricCheck?.cases || []).flatMap(entry =>
       entry.points
         .filter(point => point.kept)
-        .map(point => ({ question: entry.question, sourceEvidence: entry.sourceEvidence, point: point.point })),
+        .map(point => ({
+          question: entry.question,
+          sourceEvidence: entry.sourceEvidence,
+          ...(entry.extraPassages ? { extraPassages: entry.extraPassages } : {}),
+          point: point.point,
+        })),
     );
     const latest = readStore();
     const saved = latest.datasets.find(item => item.id === dataset.id);
