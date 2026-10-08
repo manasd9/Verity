@@ -484,10 +484,13 @@ const DECLINE_FORBIDDEN_POINTS = [
 // Evidence is one to three passages. Passage 1 is sourceEvidence (with sourceUrl for websites); Passages 2 and 3
 // are extraPassages, present only when there are any, so older single-passage records keep their exact shape.
 const MAX_PASSAGES = 3;
-function evidencePassages(item) {
-  const first = String(item?.sourceEvidence || '').trim()
-    ? [{ text: item.sourceEvidence, ...(item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}) }]
-    : [];
+// A question's (or turn's) passage list, each { text, sourceUrl? }, Passage 1 first. An empty Passage 1 is left out
+// unless keepEmptyFirst is set, for callers that must still see it (a website scenario's empty evidence fails).
+function evidencePassages(item, { keepEmptyFirst = false } = {}) {
+  const first =
+    keepEmptyFirst || String(item?.sourceEvidence || '').trim()
+      ? [{ text: item?.sourceEvidence, ...(item?.sourceUrl ? { sourceUrl: item.sourceUrl } : {}) }]
+      : [];
   return [...first, ...(item?.extraPassages || [])];
 }
 function normalizeExtraPassages(value) {
@@ -1031,17 +1034,10 @@ function validateWebsiteCases(source, cases) {
     // Each passage links to its own page, so one question's evidence can span several pages. A conversation turn's
     // passages follow the same rule; turn Passage 1 links to its own page when it names one, else to the scenario's,
     // and a turn may have no evidence of its own.
-    const turnPassages = (item.turns || []).flatMap(turn => [
-      ...(String(turn.sourceEvidence || '').trim()
-        ? [{ text: turn.sourceEvidence, sourceUrl: turn.sourceUrl || item.sourceUrl }]
-        : []),
-      ...(turn.extraPassages || []),
-    ]);
-    for (const passage of [
-      { text: item.sourceEvidence, sourceUrl: item.sourceUrl },
-      ...(item.extraPassages || []),
-      ...turnPassages,
-    ]) {
+    const turnPassages = (item.turns || []).flatMap(turn =>
+      evidencePassages({ ...turn, sourceUrl: turn.sourceUrl || item.sourceUrl }),
+    );
+    for (const passage of [...evidencePassages(item, { keepEmptyFirst: true }), ...turnPassages]) {
       if (!passage.sourceUrl) throw new Error('Every website scenario needs a source page URL.');
       const page = source.pages.find(value => value.url === passage.sourceUrl);
       if (!page || !hasSourceEvidence(page.text, passage.text))
@@ -1270,8 +1266,8 @@ function datasetCoverage(store, dataset) {
     // without its own evidence uses its first turn's.
     const found = new Set(
       source.kind === 'website'
-        ? [item.sourceUrl, ...(item.extraPassages || []).map(passage => passage.sourceUrl)].map(url =>
-            topics.findIndex(topic => topic.url === url),
+        ? evidencePassages(item, { keepEmptyFirst: true }).map(passage =>
+            topics.findIndex(topic => topic.url === passage.sourceUrl),
           )
         : (evidencePassages(item).length ? evidencePassages(item) : evidencePassages(item.turns?.[0])).map(passage =>
             coverageSection(topics, fullText, item, passage.text),
@@ -1478,13 +1474,13 @@ async function checkDeclineCases(store, source, control, cases, signal) {
 // verifies each quote by text match, so support cannot be invented. It only flags; nothing is removed.
 // An entry is either { item, passages } (the passages to check, Passage 1 first, each { text, sourceUrl? }) or, for a
 // question with a single passage, { item, previous, next } with the passages around it in the source. A draft whose
-// evidence came from search (passageList) checks every question over its passages, even one that kept only Passage 1,
-// since that passage may be merged and no longer one of the source's cuts.
-function rubricCheckEntries(cases, sources, passageList = false) {
+// evidence came from search (evidenceSearched) checks every question over its passages, even one that kept only
+// Passage 1, since that passage may be merged and no longer one of the source's cuts.
+function rubricCheckEntries(cases, sources, { evidenceSearched = false } = {}) {
   return cases
     .filter(item => item.caseType !== 'decline' && !item.turns?.length && item.requiredPoints.length)
     .map(item => {
-      if (passageList || item.extraPassages?.length) return { item, passages: evidencePassages(item) };
+      if (evidenceSearched || item.extraPassages?.length) return { item, passages: evidencePassages(item) };
       const at = sources.findIndex(source => source.text === item.sourceEvidence);
       // Passages are cut every 500 characters, so a rule can start in the passage before the evidence or end after it.
       const neighbour = offset => {
@@ -1579,7 +1575,7 @@ function passageCheck({ item, passages }, result) {
 // Keeps only the given passage numbers (Passage 1 always stays first) of a check made over a passage list. Points
 // are renumbered to the kept passages; a point that needed a dropped passage is no longer supported.
 function narrowPassageCheck(checked, keep) {
-  const passages = [{ text: checked.sourceEvidence }, ...(checked.extraPassages || [])];
+  const passages = evidencePassages(checked, { keepEmptyFirst: true });
   const numbers = [
     1,
     ...[...new Set(keep)].filter(number => number > 1 && number <= passages.length).sort((a, b) => a - b),
@@ -1705,14 +1701,14 @@ async function searchEvidence({ source, passages, passageVectors, connection, co
       evidenceCandidates(source, passages, vectors, origins[index], queryVectors[index]),
     ]),
   );
-  const withPassage1 = cases.map(item => {
+  const casesWithMergedPassage1 = cases.map(item => {
     const candidates = candidatesFor.get(item);
     return candidates ? { ...item, sourceEvidence: candidates[0].text } : item;
   });
-  const entries = withPassage1
+  const entries = casesWithMergedPassage1
     .map((item, index) => ({ item, passages: candidatesFor.get(cases[index]) }))
     .filter(entry => entry.passages && entry.item.requiredPoints.length);
-  if (!entries.length) return { cases: withPassage1 };
+  if (!entries.length) return { cases: casesWithMergedPassage1 };
   let checks;
   try {
     const raw = await callModel(control, rubricCheckMessages(entries), true, { signal, step: 'Rubric check' });
@@ -1725,7 +1721,7 @@ async function searchEvidence({ source, passages, passageVectors, connection, co
   }
   const checkFor = new Map(entries.map((entry, index) => [entry.item, checks[index]]));
   return {
-    cases: withPassage1.map(item => {
+    cases: casesWithMergedPassage1.map(item => {
       const extraPassages = checkFor.get(item)?.extraPassages;
       return extraPassages ? { ...item, extraPassages } : item;
     }),
@@ -1795,7 +1791,10 @@ function rubricCheckKey(record) {
     !extra.every(passage => typeof passage?.text === 'string')
   )
     return null;
-  return JSON.stringify([record.question, record.sourceEvidence, ...extra.map(passage => passage.text)]);
+  return JSON.stringify([
+    record.question,
+    ...evidencePassages(record, { keepEmptyFirst: true }).map(passage => passage.text),
+  ]);
 }
 function sameRubricKey(a, b) {
   const key = rubricCheckKey(a);
@@ -2593,7 +2592,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     if (!answerCases.length)
       throw new Error('The control model did not cite any valid source passages. Please try again.');
     // Without the search (no OpenAI connection, or any part of the search failed) the draft is generated as before.
-    const todaysRubricCheck = () => {
+    const neighbourRubricCheck = () => {
       const rubricEntries = rubricCheckEntries(answerCases, sources);
       return rubricEntries.length
         ? callModel(connection, rubricCheckMessages(rubricEntries), true, { signal, step: 'Rubric check' })
@@ -2612,7 +2611,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     }).then(async searched =>
       searched
         ? { evidenceSearch: 'used', ...searched }
-        : { evidenceSearch: 'unavailable', cases: answerCases, rubricCheck: await todaysRubricCheck() },
+        : { evidenceSearch: 'unavailable', cases: answerCases, rubricCheck: await neighbourRubricCheck() },
     );
     evidenceRun.catch(() => {}); // Awaited below, after the decline step; this only stops an early failure crashing.
     let declineCheck;
@@ -2724,7 +2723,7 @@ app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
     if (!control) return res.status(400).json({ error: 'Connect a control model in Settings first.' });
     usageAboutDataset(store, dataset);
     const sources = source.kind === 'website' ? sourcePassages(source).slice(0, 120) : sourcePassages(source);
-    const entries = rubricCheckEntries(dataset.cases, sources, dataset.evidenceSearch === 'used');
+    const entries = rubricCheckEntries(dataset.cases, sources, { evidenceSearched: dataset.evidenceSearch === 'used' });
     let rubricCheck;
     try {
       rubricCheck = {

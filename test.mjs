@@ -1128,6 +1128,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
         'rubricCheckMarkup',
         'rubricCheckNote',
         'rubricCheckKey',
+        'casePassages',
         'keptRubricPoints',
       );
       const {
@@ -1755,7 +1756,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
 // Results and the report show evidence the same way: one passage as before, two or three labelled Passage 1 to 3.
 {
   const { evidenceMarkup } = new Function(
-    `${topLevel(js, 'HTML_ESCAPES', 'escapeHtml', 'safeHttpUrl', 'sourceLink', 'evidenceMarkup')}; return { evidenceMarkup };`,
+    `${topLevel(js, 'HTML_ESCAPES', 'escapeHtml', 'safeHttpUrl', 'sourceLink', 'casePassages', 'evidenceMarkup')}; return { evidenceMarkup };`,
   )();
   const attributes = ' target="_blank" rel="noreferrer"';
   assert.equal(

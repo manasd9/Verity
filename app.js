@@ -404,11 +404,7 @@ function rubricCheckFor(dataset, item) {
 }
 // The evidence is every passage's text, in order, so an edited, reordered or removed passage loses the check.
 function rubricCheckKey(record) {
-  return JSON.stringify([
-    record.question,
-    record.sourceEvidence,
-    ...(record.extraPassages || []).map(passage => passage.text),
-  ]);
+  return JSON.stringify([record.question, ...casePassages(record).map(passage => passage.text)]);
 }
 // Checks saved before 7 October 2026 call this flag asked.
 function pointNeeded(point) {
@@ -2746,8 +2742,9 @@ function sourceLink(value, attributes = '') {
 function evidenceMarkup(item, linkAttributes) {
   const passage = ({ text, sourceUrl }) =>
     `<p>${escapeHtml(text)}</p>${sourceUrl ? `<p>${sourceLink(sourceUrl, linkAttributes)}</p>` : ''}`;
-  if (!item.extraPassages?.length) return passage({ text: item.sourceEvidence, sourceUrl: item.sourceUrl });
-  return [{ text: item.sourceEvidence, sourceUrl: item.sourceUrl }, ...item.extraPassages]
+  const passages = casePassages(item);
+  if (passages.length === 1) return passage(passages[0]);
+  return passages
     .map((entry, index) => `<p><b>${escapeHtml(`Passage ${index + 1}`)}</b></p>${passage(entry)}`)
     .join('');
 }
