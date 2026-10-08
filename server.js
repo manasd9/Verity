@@ -1531,6 +1531,29 @@ function passageCheck({ item, passages }, result) {
     }),
   };
 }
+// Keeps only the given passage numbers (Passage 1 always stays first) of a check made over a passage list. Points
+// are renumbered to the kept passages; a point that needed a dropped passage is no longer supported.
+function narrowPassageCheck(checked, keep) {
+  const passages = [{ text: checked.sourceEvidence }, ...(checked.extraPassages || [])];
+  const numbers = [
+    1,
+    ...[...new Set(keep)].filter(number => number > 1 && number <= passages.length).sort((a, b) => a - b),
+  ];
+  const { extraPassages, ...rest } = checked;
+  return {
+    ...rest,
+    ...(numbers.length > 1 ? { extraPassages: numbers.slice(1).map(number => passages[number - 1]) } : {}),
+    points: checked.points.map(point => {
+      const supported = point.supported && point.passages.every(number => numbers.includes(number));
+      return {
+        ...point,
+        supported,
+        quote: supported ? point.quote : '',
+        passages: supported ? point.passages.map(number => numbers.indexOf(number) + 1) : [],
+      };
+    }),
+  };
+}
 function applyRubricCheck(entries, raw) {
   const results = JSON.parse(raw).results;
   if (!Array.isArray(results)) throw new Error('The control model did not return a rubric check.');
@@ -2901,6 +2924,7 @@ module.exports = {
   rubricCheckEntries,
   rubricCheckMessages,
   applyRubricCheck,
+  narrowPassageCheck,
   keepRubricCheck,
   markKeptRubricPoints,
   usagePrices,

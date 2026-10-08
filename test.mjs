@@ -2644,6 +2644,54 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     'only the named point is kept; bad entries are ignored',
   );
   assert.deepEqual(markKeptRubricPoints(check, 'not a list'), check);
+
+  // Evidence by search hands the check candidate passages, learns which were quoted, then keeps only those.
+  const { narrowPassageCheck } = require('./server.js');
+  const candidates = [
+    { text: 'Pets are allowed in ground-floor rooms only.' },
+    { text: 'Parking is valet only and costs $25 per night.' },
+    { text: 'Pets must be on a lead in shared areas.', sourceUrl: 'https://hotel.example/rules' },
+    { text: 'Breakfast is served from 7 to 10 every day.' },
+  ];
+  const dog = normalizeDatasetCase({
+    question: 'Can I bring my dog?',
+    expectedAnswer: 'Yes, ground floor, on a lead.',
+    requiredPoints: ['Ground floor only', 'On a lead', 'Breakfast at 7'],
+    sourceEvidence: candidates[0].text,
+  });
+  const [overCandidates] = applyRubricCheck(
+    [{ item: dog, passages: candidates }],
+    reply([
+      {
+        question: 1,
+        points: [
+          { point: 1, quotes: [{ passage: 1, quote: 'ground-floor rooms only' }], needed: true },
+          { point: 2, quotes: [{ passage: 3, quote: 'on a lead in shared areas' }], needed: true },
+          { point: 3, quotes: [{ passage: 4, quote: 'served from 7 to 10' }], needed: false },
+        ],
+      },
+    ]),
+  );
+  assert.deepEqual(
+    overCandidates.points.map(point => point.passages),
+    [[1], [3], [4]],
+    'each point names the candidates it was quoted from',
+  );
+  const narrowed = narrowPassageCheck(overCandidates, [1, 3]);
+  assert.equal(narrowed.sourceEvidence, candidates[0].text);
+  assert.deepEqual(narrowed.extraPassages, [candidates[2]], 'only the kept passages remain, in order');
+  assert.deepEqual(
+    narrowed.points.map(point => [point.supported, point.passages, point.quote]),
+    [
+      [true, [1], 'ground-floor rooms only'],
+      [true, [2], 'on a lead in shared areas'],
+      [false, [], ''],
+    ],
+    'kept quotes are renumbered; a point quoted from a dropped passage is no longer supported',
+  );
+  assert.equal(narrowed.points[2].needed, false);
+  assert.equal(keepRubricCheck({ cases: [narrowed] }, [{ ...dog, extraPassages: [candidates[2]] }]).cases.length, 1);
+  assert.equal(narrowPassageCheck(overCandidates, [1]).extraPassages, undefined, 'Passage 1 alone keeps the old shape');
 }
 // Coverage: which sections of a source have questions.
 {
