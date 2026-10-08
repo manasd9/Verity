@@ -942,21 +942,29 @@ function usageFormula(entry, prices) {
     ' = '
   );
 }
+// Runs and drafts are tagged when they start, so calls billed before a failure or a cancel still land in their group.
 function usageCategory(entry) {
   return entry.evaluationId
     ? 'runs'
-    : entry.datasetId || entry.cancelled
+    : entry.datasetId || entry.draftGeneration || entry.cancelled
       ? 'drafts'
-      : entry.sourceId
+      : entry.sourceId || entry.websiteId
         ? 'indexing'
         : 'other';
+}
+// The group a line sits in under its document: one run, one draft, one unsaved draft attempt, or the uploads.
+function usageGroupKey(entry) {
+  const category = usageCategory(entry);
+  if (category === 'runs') return `run:${entry.evaluationId}`;
+  if (category === 'drafts') return entry.datasetId ? `draft:${entry.datasetId}` : `unsaved:${entry.at}`;
+  return 'upload';
 }
 // Groups the workspace's usage by document, then by upload, draft and run, newest first.
 function usageByDocument(usage, prices, datasets, evaluations) {
   const sum = entries => entries.reduce((total, entry) => total + (usageCost(entry, prices) ?? 0), 0);
   const byDocument = new Map();
   for (const entry of usage) {
-    const key = entry.sourceId ? entry.websiteId || entry.sourceId : 'none';
+    const key = entry.websiteId || entry.sourceId || 'none';
     if (!byDocument.has(key)) byDocument.set(key, []);
     byDocument.get(key).push(entry);
   }
@@ -965,13 +973,7 @@ function usageByDocument(usage, prices, datasets, evaluations) {
       const latest = entries.reduce((a, b) => (a.at > b.at ? a : b));
       const groups = new Map();
       for (const entry of entries) {
-        const groupKey = entry.evaluationId
-          ? `run:${entry.evaluationId}`
-          : entry.datasetId
-            ? `draft:${entry.datasetId}`
-            : entry.cancelled
-              ? `cancelled:${entry.at}`
-              : 'upload';
+        const groupKey = usageGroupKey(entry);
         if (!groups.has(groupKey)) groups.set(groupKey, []);
         groups.get(groupKey).push(entry);
       }
@@ -989,12 +991,12 @@ function usageByDocument(usage, prices, datasets, evaluations) {
           title = dataset
             ? `Draft · ${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'}`
             : 'Draft (removed)';
-        } else if (groupKey.startsWith('cancelled:')) {
-          title = 'Cancelled draft · ' + when;
+        } else if (groupKey.startsWith('unsaved:')) {
+          title = (first.cancelled ? 'Cancelled draft · ' : 'Draft not saved · ') + when;
         } else if (groupKey.startsWith('run:')) {
           const run = evaluations.find(item => item.id === first.evaluationId);
           title =
-            'Evaluation run · ' +
+            (run ? 'Evaluation run · ' : 'Evaluation run (not saved) · ') +
             when +
             (first.agentName || run?.agentName ? ' · ' + (first.agentName || run.agentName) : ''); // Plain text; escaped below.
         }
@@ -1005,7 +1007,7 @@ function usageByDocument(usage, prices, datasets, evaluations) {
         name: key === 'none' ? 'Not tied to a document' : latest.sourceName || 'Removed source',
         kind: key === 'none' ? 'Settings' : latest.sourceKind || 'source',
         cost: sum(entries),
-        split: ['drafts', 'runs', 'indexing', 'other'].map(category => ({
+        split: Object.keys(USAGE_CATEGORY_LABELS).map(category => ({
           category,
           cost: sum(entries.filter(entry => usageCategory(entry) === category)),
         })),

@@ -90,12 +90,10 @@ function usageAbout(fields) {
   const meter = usageContext.getStore();
   if (meter) Object.assign(meter.about, fields);
 }
-// Saves the entries recorded since the last save, so a request can be saved more than once (on close, then on end).
 function saveUsage(meter) {
-  const entries = meter.entries.splice(0);
-  if (!entries.length) return;
+  if (!meter.entries.length) return;
   const merged = new Map();
-  for (const entry of entries) {
+  for (const entry of meter.entries) {
     const key = `${entry.step}|${entry.model}`;
     const total = merged.get(key) || {
       step: entry.step,
@@ -115,6 +113,16 @@ function saveUsage(meter) {
   const store = readStore();
   store.usage.push(...[...merged.values()].map(total => ({ id: id('usage'), at, ...meter.about, ...total })));
   saveStore(store);
+}
+// Tags usage with a website before its crawl, so calls billed before a failure still belong to it, then with the snapshot.
+function usageAboutWebsite(website, snapshot) {
+  usageAbout({
+    ...(snapshot ? { sourceId: snapshot.id } : {}),
+    websiteId: website.id,
+    sourceName: snapshot?.name || new URL(website.rootUrl).hostname,
+    sourceKind: 'website',
+    ...recordScope(website),
+  });
 }
 // Tags usage with a dataset's source (and any extra fields such as the run).
 function usageAboutDataset(store, dataset, extra = {}) {
@@ -1531,25 +1539,16 @@ app.use((req, res, next) => {
   const route = req.method === 'POST' && METERED_ROUTES.find(([pattern]) => pattern.test(req.path));
   if (!route) return next();
   const meter = { defaults: route[1], about: {}, entries: [] };
-  const save = () => {
+  const end = res.end;
+  res.end = function (...args) {
+    res.end = end;
     try {
       saveUsage(meter);
     } catch (error) {
       console.error('Usage could not be saved:', error.message);
     }
-  };
-  const end = res.end;
-  res.end = function (...args) {
-    res.end = end;
-    save();
     return end.apply(this, args);
   };
-  // The browser gave up before the reply (a cancelled draft): the calls already made are still billed, so save them.
-  res.on('close', () => {
-    if (res.writableEnded) return;
-    meter.about.cancelled = true;
-    save();
-  });
   usageContext.run(meter, next);
 });
 app.get('/vendor/livekit-client.js', (req, res) =>
@@ -2094,14 +2093,9 @@ app.post('/api/websites', async (req, res, next) => {
       ...requestedScope(readStore(), req.body),
       createdAt: new Date().toISOString(),
     };
+    usageAboutWebsite(website);
     const { snapshot, chunks } = await createWebsiteSnapshot(openAIControlConnection(readStore()), website, rootUrl);
-    usageAbout({
-      sourceId: snapshot.id,
-      websiteId: website.id,
-      sourceName: snapshot.name,
-      sourceKind: 'website',
-      ...recordScope(website),
-    });
+    usageAboutWebsite(website, snapshot);
     const store = readStore();
     store.websites.push(website);
     store.websiteSnapshots.push(snapshot);
@@ -2118,18 +2112,13 @@ app.post('/api/websites/:id/recrawl', async (req, res, next) => {
     const website = initial.websites.find(item => item.id === req.params.id);
     if (!website) throw new Error('Website source not found.');
     if (website.orgId) requestedScope(initial, website);
+    usageAboutWebsite(website);
     const { snapshot, chunks } = await createWebsiteSnapshot(
       openAIControlConnection(initial),
       website,
       website.rootUrl,
     );
-    usageAbout({
-      sourceId: snapshot.id,
-      websiteId: website.id,
-      sourceName: snapshot.name,
-      sourceKind: 'website',
-      ...recordScope(website),
-    });
+    usageAboutWebsite(website, snapshot);
     const store = readStore();
     if (!store.websites.some(item => item.id === website.id)) throw new Error('Website source not found.');
     store.websiteSnapshots.push(snapshot);
@@ -2246,6 +2235,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       sourceKind: document.kind,
       ...(document.websiteId ? { websiteId: document.websiteId } : {}),
       ...recordScope(document),
+      draftGeneration: true,
     });
     const caseType = website
       ? 'website knowledge-base evaluation cases'
@@ -2313,20 +2303,25 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       ...(rubricCheck ? { rubricCheck } : {}),
       createdAt: new Date().toISOString(),
     };
-    usageAbout({ datasetId: dataset.id });
     const latest = readStore();
     const latestSource = resolveDocument(latest, documentId);
     if (!latestSource || !sameScope(latestSource, document))
       throw new Error('The source changed while generating the dataset. Try again.');
-    if (signal.aborted) return;
+    if (signal.aborted) return endCancelledGeneration(res);
+    usageAbout({ datasetId: dataset.id });
     latest.datasets.push(dataset);
     saveStore(latest);
     res.status(201).json(publicDataset(latest, dataset));
   } catch (error) {
-    if (signal.aborted) return;
+    if (signal.aborted) return endCancelledGeneration(res);
     next(error);
   }
 });
+// The browser has gone, but ending the response still saves the usage of the calls made before the cancel.
+function endCancelledGeneration(res) {
+  usageAbout({ cancelled: true });
+  res.end();
+}
 app.put('/api/datasets/:id', (req, res) => {
   const store = readStore();
   const dataset = store.datasets.find(item => item.id === req.params.id);
@@ -2347,10 +2342,8 @@ app.put('/api/datasets/:id', (req, res) => {
   saveStore(store);
   res.json(publicDataset(store, dataset));
 });
-// Re-runs the rubric check on a draft's saved scenarios (the page saves the review first). Keep choices carry
-// over for points that did not change.
-// Prices per million tokens, per model, for the Usage page's cost estimates.
 app.get('/api/usage', (req, res) => res.json({ usage: readStore().usage }));
+// Prices per million tokens, per model, for the Usage page's cost estimates.
 app.put('/api/usage-prices', (req, res) => {
   const { model, input, output } = req.body;
   const price = value => (value === '' || value === undefined ? NaN : Number(value));
@@ -2363,6 +2356,8 @@ app.put('/api/usage-prices', (req, res) => {
   saveStore(store);
   res.json(usagePrices(store));
 });
+// Re-runs the rubric check on a draft's saved scenarios (the page saves the review first). Keep choices carry
+// over for points that did not change.
 app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
   try {
     const store = readStore();
@@ -2442,7 +2437,8 @@ app.post('/api/evaluations', async (req, res, next) => {
     if (!dataset || !target || !control || !document)
       throw new Error('An approved dataset, its document, target agent, and control model are required.');
     if (!sameScope(dataset, document)) throw new Error('The dataset belongs to a different source or agent.');
-    usageAboutDataset(store, dataset, { agentName: target.name });
+    const evaluationId = id('eval');
+    usageAboutDataset(store, dataset, { agentName: target.name, evaluationId });
     if (target.kind === 'flexagent-livekit' || recordScope(dataset))
       throw new Error('Use the selected agent’s LiveKit evaluation for this benchmark.');
     if (document.kind === 'technical' && target.kind === 'flexagent')
@@ -2571,7 +2567,7 @@ app.post('/api/evaluations', async (req, res, next) => {
       });
     }
     const evaluation = {
-      id: id('eval'),
+      id: evaluationId,
       datasetId,
       documentKind: document.kind,
       ...(document.kind === 'website' ? { snapshotId: document.id } : {}),
@@ -2583,7 +2579,6 @@ app.post('/api/evaluations', async (req, res, next) => {
       results,
       ...evaluationScores(results),
     };
-    usageAbout({ evaluationId: evaluation.id });
     const latest = readStore();
     latest.evaluations.unshift(evaluation);
     saveStore(latest);
@@ -2599,7 +2594,8 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
     const dataset = store.datasets.find(item => item.id === datasetId && item.status === 'approved');
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !control) throw new Error('An approved dataset and control model are required.');
-    usageAboutDataset(store, dataset, { agentName: 'Pasted answers' });
+    const evaluationId = id('eval');
+    usageAboutDataset(store, dataset, { agentName: 'Pasted answers', evaluationId });
     if (recordScope(dataset)) requestedScope(store, dataset);
     if (
       !Array.isArray(answers) ||
@@ -2614,7 +2610,7 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
       results.push({ case: item, answer, manual: true, retrievedChunks: [], retrievalUnavailable: true, ...verdict });
     }
     const evaluation = {
-      id: id('eval'),
+      id: evaluationId,
       datasetId,
       documentKind: resolveDocument(store, dataset.documentId)?.kind,
       ...recordScope(dataset),
@@ -2628,7 +2624,6 @@ app.post('/api/evaluations/manual', async (req, res, next) => {
       results,
       ...evaluationScores(results),
     };
-    usageAbout({ evaluationId: evaluation.id });
     const latest = readStore();
     latest.evaluations.unshift(evaluation);
     saveStore(latest);
@@ -2658,7 +2653,8 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
     const control = store.connections.find(item => item.id === controlConnectionId && item.role === 'control');
     if (!dataset || !target || !control)
       throw new Error('An approved dataset, LiveKit FlexAgent target, and control model are required.');
-    usageAboutDataset(store, dataset, { agentName: dataset.agentName || target.name });
+    const evaluationId = id('eval');
+    usageAboutDataset(store, dataset, { agentName: dataset.agentName || target.name, evaluationId });
     if (!sameScope(dataset, target) || !sameScope(dataset, resolveDocument(store, dataset.documentId)))
       throw new Error('The approved dataset does not belong to this FlexAgent.');
     requestedScope(store, target);
@@ -2686,7 +2682,7 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
       });
     }
     const evaluation = {
-      id: id('eval'),
+      id: evaluationId,
       datasetId,
       documentKind: resolveDocument(store, dataset.documentId)?.kind,
       ...recordScope(dataset),
@@ -2700,7 +2696,6 @@ app.post('/api/evaluations/livekit', async (req, res, next) => {
       results,
       ...evaluationScores(results),
     };
-    usageAbout({ evaluationId: evaluation.id });
     const latest = readStore();
     latest.evaluations.unshift(evaluation);
     saveStore(latest);

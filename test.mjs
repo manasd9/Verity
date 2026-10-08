@@ -1949,7 +1949,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
 {
   const { encrypt } = require('./server.js');
   assert.equal(
-    server.match(/const evaluation = \{\s*id: id\('eval'\),[^;]*?judge: judgeSettings\(control\),/g)?.length,
+    server.match(/const evaluation = \{\s*id: evaluationId,[^;]*?judge: judgeSettings\(control\),/g)?.length,
     3,
     'all three evaluation routes record judge settings',
   );
@@ -2758,6 +2758,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     'usageMoney',
     'usageFormula',
     'usageCategory',
+    'usageGroupKey',
     'usageByDocument',
     'USAGE_CATEGORY_LABELS',
     'usageCard',
@@ -2866,7 +2867,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       inputTokens: 950,
     }),
   ];
-  const documents = usageByDocument(usage, prices, [{ id: 'ds_1', cases: [{}, {}, {}] }], []);
+  const documents = usageByDocument(usage, prices, [{ id: 'ds_1', cases: [{}, {}, {}] }], [{ id: 'ev_1' }]);
   assert.deepEqual(
     documents.map(document => document.name),
     ['Harbor <manual>.docx', 'hotel.example', 'Not tied to a document'],
@@ -2899,23 +2900,65 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     usageByDocument(usage, prices, [], [])[0].groups.find(group => group.title.startsWith('Draft')).title,
     'Draft (removed)',
   );
-  const cancelled = usageByDocument(
+  // Runs, drafts and crawls are tagged when they start, so a failure or a cancel still lands in the right group.
+  const unsaved = usageByDocument(
     [
       entry({
         at: '2026-10-07T14:00:00Z',
         step: 'Normal questions',
         sourceId: 'doc_9',
         sourceName: 'Spa.pdf',
+        draftGeneration: true,
         cancelled: true,
+        inputTokens: 1000,
+      }),
+      entry({
+        at: '2026-10-07T15:00:00Z',
+        step: 'Normal questions',
+        sourceId: 'doc_9',
+        sourceName: 'Spa.pdf',
+        draftGeneration: true,
+        inputTokens: 1000,
+      }),
+      entry({
+        at: '2026-10-07T16:00:00Z',
+        step: 'Agent answers',
+        sourceId: 'doc_9',
+        sourceName: 'Spa.pdf',
+        datasetId: 'ds_9',
+        evaluationId: 'ev_failed',
+        inputTokens: 1000,
+      }),
+      entry({
+        at: '2026-10-07T17:00:00Z',
+        step: 'Indexing',
+        model: 'text-embedding-3-small',
+        websiteId: 'site_9',
+        sourceName: 'spa.example',
+        sourceKind: 'website',
         inputTokens: 1000,
       }),
     ],
     prices,
     [],
     [],
-  )[0];
-  assert.match(cancelled.groups[0].title, /^Cancelled draft · /, 'a cancelled draft is its own group');
-  assert.equal(cancelled.split.find(part => part.category === 'drafts').cost, cancelled.cost, 'it counts as drafts');
+  );
+  const spa = unsaved.find(document => document.name === 'Spa.pdf');
+  assert.deepEqual(
+    spa.groups.map(group => group.title.split(' · ')[0]),
+    ['Evaluation run (not saved)', 'Draft not saved', 'Cancelled draft'],
+    'a failed run keeps its own group; each unsaved draft attempt is its own group',
+  );
+  assert.equal(
+    spa.split.find(part => part.category === 'drafts').cost,
+    usageCost(entry({ inputTokens: 2000 }), prices),
+    'unsaved draft attempts count as drafts',
+  );
+  assert.deepEqual(
+    unsaved.find(document => document.name === 'spa.example').groups.map(group => group.title),
+    ['Upload and indexing'],
+    'a crawl that failed before its snapshot still belongs to its website',
+  );
   // The Usage page fetches the latest usage when it opens, so it shows what was spent since the page loaded.
   assert.match(js, /if \(page === 'usage'\) refreshUsage\(\);/);
   assert.match(js, /fetch\('\/api\/usage', \{ cache: 'no-store' \}\)/);
@@ -3410,7 +3453,9 @@ try {
         'a cancelled draft still records the calls it made before the cancel',
       );
       assert.ok(
-        cancelledUsage.every(entry => entry.sourceId === scopedDocument.body.id && !entry.datasetId),
+        cancelledUsage.every(
+          entry => entry.sourceId === scopedDocument.body.id && entry.draftGeneration && !entry.datasetId,
+        ),
         'cancelled usage belongs to its source, with no draft',
       );
     } finally {
