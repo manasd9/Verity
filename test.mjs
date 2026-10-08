@@ -1280,6 +1280,10 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       delete fields.caseType;
       delete fields.declineKind;
       assert.equal('caseType' in reviewedCases(form, { cases: [{}] })[0], false);
+      // The review page edits Passage 1; Passages 2 and 3 survive a save untouched.
+      const extraPassages = [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }];
+      assert.deepEqual(reviewedCases(form, { cases: [{ extraPassages }] })[0].extraPassages, extraPassages);
+      assert.equal('extraPassages' in reviewedCases(form, { cases: [{}] })[0], false);
     }
     {
       const coverageCode = js.slice(js.indexOf('function coverageMarkup'), js.indexOf('function declineCheckNote'));
@@ -1541,6 +1545,44 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       unescaped.push(`${expression} after "${before.slice(-40)}"`);
   }
   assert.deepEqual(unescaped, [], 'Unescaped values in HTML templates');
+}
+// Results and the report show evidence the same way: one passage as before, two or three labelled Passage 1 to 3.
+{
+  const { evidenceMarkup } = new Function(
+    `${topLevel(js, 'HTML_ESCAPES', 'escapeHtml', 'safeHttpUrl', 'sourceLink', 'evidenceMarkup')}; return { evidenceMarkup };`,
+  )();
+  const attributes = ' target="_blank" rel="noreferrer"';
+  assert.equal(
+    evidenceMarkup({ sourceEvidence: 'Pets <only> downstairs.', sourceUrl: 'https://hotel.example/rooms' }, attributes),
+    '<p>Pets &lt;only&gt; downstairs.</p><p><a href="https://hotel.example/rooms" target="_blank" rel="noreferrer">https://hotel.example/rooms</a></p>',
+    'a one-passage question renders exactly as before',
+  );
+  assert.equal(evidenceMarkup({ sourceEvidence: 'Pets downstairs.' }, ''), '<p>Pets downstairs.</p>');
+  const three = evidenceMarkup(
+    {
+      sourceEvidence: 'Pets downstairs.',
+      sourceUrl: 'https://hotel.example/rooms',
+      extraPassages: [
+        { text: 'Pets on a lead.', sourceUrl: 'https://hotel.example/rules' },
+        { text: 'Damage is charged.', sourceUrl: 'https://hotel.example/fees' },
+      ],
+    },
+    ' rel="noreferrer"',
+  );
+  assert.deepEqual(
+    [...three.matchAll(/<b>(Passage \d)<\/b>/g)].map(match => match[1]),
+    ['Passage 1', 'Passage 2', 'Passage 3'],
+  );
+  assert.match(
+    three,
+    /<b>Passage 2<\/b><\/p><p>Pets on a lead\.<\/p><p><a href="https:\/\/hotel\.example\/rules" rel="noreferrer">/,
+    'each passage carries its own page link',
+  );
+  assert.equal(
+    js.match(/evidenceMarkup\((result|item)\.case, '[^']*'\)/g)?.length,
+    2,
+    'the results page and the report both use evidenceMarkup',
+  );
 }
 
 // Outbound endpoint validation: public HTTPS only, resolved addresses checked, redirects re-validated.
