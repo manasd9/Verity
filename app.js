@@ -440,7 +440,11 @@ function rubricCheckMarkup(entry, index, editable) {
             : point.continues
               ? 'In the next passage'
               : '';
-      return `<li class="${flags.length ? 'is-flagged' : 'is-ok'}"><span>${escapeHtml(point.point)}</span>${point.quote ? `<q>${escapeHtml(point.quote)}</q>` : ''}${where ? `<small>${escapeHtml(where)}</small>` : ''}${flags.length ? `<b>${escapeHtml(flags.join(' · '))}</b>` : ''}${actions}</li>`;
+      const passage =
+        !where && Number.isInteger(point.passage) && point.passage > 0
+          ? `<small><button class="rubric-jump js-passage-jump" data-index="${index}" data-passage="${point.passage}" type="button">In Passage ${point.passage}</button></small>`
+          : '';
+      return `<li class="${flags.length ? 'is-flagged' : 'is-ok'}"><span>${escapeHtml(point.point)}</span>${point.quote ? `<q>${escapeHtml(point.quote)}</q>` : ''}${where ? `<small>${escapeHtml(where)}</small>` : ''}${passage}${flags.length ? `<b>${escapeHtml(flags.join(' · '))}</b>` : ''}${actions}</li>`;
     })
     .join('');
   return `<section id="rubric-check-${index}" class="rubric-check field full" aria-label="Rubric check"><p><b>Rubric check</b> Remove a flagged point, or keep it if you want it tested.</p><ul>${rows}</ul></section>`;
@@ -497,6 +501,48 @@ function declineCheckNote(dataset) {
     : '';
   return `<p class="decline-check" role="note"><b>${check.kept} “should decline” ${check.kept === 1 ? 'question' : 'questions'}</b> checked against ${check.checkedSources?.length || 0} ${check.checkedSources?.length === 1 ? 'source' : 'sources'} in Verity.${dropped}${weak} Verity only sees sources uploaded here, so confirm each is not answered anywhere in the agent’s knowledge base.</p>`;
 }
+// Evidence is one to three passages: Passage 1 is sourceEvidence (+ sourceUrl), Passages 2 and 3 are extraPassages.
+const MAX_REVIEW_PASSAGES = 3;
+function casePassages(item) {
+  return [
+    { text: item.sourceEvidence || '', sourceUrl: item.sourceUrl || '' },
+    ...(item.extraPassages || []).map(passage => ({ text: passage.text || '', sourceUrl: passage.sourceUrl || '' })),
+  ];
+}
+// One box per passage, one shown at a time behind a switch. Passage 1 keeps the sourceEvidence and sourceUrl fields
+// that saving, "Needs input" and the list label read; hidden boxes stay in the form so saving sends every passage.
+function reviewPassagesMarkup(passages, index, editable, website, active = 0) {
+  const tabs = passages
+    .map(
+      (_, position) =>
+        `<button class="passage-tab js-passage-tab" data-index="${index}" data-passage="${position + 1}" type="button" aria-pressed="${position === active}">Passage ${position + 1}</button>`,
+    )
+    .join('');
+  const add =
+    editable && passages.length < MAX_REVIEW_PASSAGES
+      ? `<button class="passage-add js-add-passage" data-index="${index}" type="button">+ Add passage</button>`
+      : '';
+  const switcher =
+    passages.length > 1 || editable
+      ? `<div class="passage-switch" role="group" aria-label="Passages">${tabs}${add}</div>`
+      : '';
+  const panes = passages
+    .map((passage, position) => {
+      const number = position + 1;
+      const textField = number === 1 ? 'data-field="sourceEvidence"' : `data-field="passage" data-passage="${number}"`;
+      const urlField = number === 1 ? 'data-field="sourceUrl"' : `data-field="passageUrl" data-passage="${number}"`;
+      const url = website
+        ? `<label>Page link<input ${urlField} data-index="${index}" value="${escapeHtml(passage.sourceUrl)}" aria-label="Passage ${number} page link" ${editable ? '' : 'readonly '}/></label>`
+        : '';
+      const remove =
+        editable && passages.length > 1
+          ? `<button class="passage-remove js-remove-passage" data-index="${index}" data-passage="${number}" type="button">Remove Passage ${number}</button>`
+          : '';
+      return `<div class="review-passage" data-passage="${number}" ${position === active ? '' : 'hidden'}>${url}<textarea ${textField} data-index="${index}" aria-label="Passage ${number}" ${editable ? '' : 'readonly'}>${escapeHtml(passage.text)}</textarea>${remove}</div>`;
+    })
+    .join('');
+  return `<div id="review-passages-${index}" class="field full review-passages"><div class="review-passages-head"><span class="review-passages-label">Source evidence</span>${switcher}</div>${panes}</div>`;
+}
 function datasetReview(dataset) {
   const editable = dataset.status !== 'approved';
   if (reviewScenarioDatasetId !== dataset.id) {
@@ -509,7 +555,7 @@ function datasetReview(dataset) {
   const cases = dataset.cases
     .map(
       (item, index) =>
-        `<fieldset id="review-case-${index}" class="review-case" ${index === active ? '' : 'hidden'}><legend>Scenario ${index + 1} of ${dataset.cases.length}</legend>${isDecline(item) ? `${declineTag(item)}<input type="hidden" data-field="caseType" data-index="${index}" value="decline" /><input type="hidden" data-field="declineKind" data-index="${index}" value="${escapeHtml(item.declineKind || 'close-but-missing')}" /><p class="help">The agent should say it does not have this information, or offer to connect the customer with staff, without inventing details. Check it is not answered anywhere in the agent’s knowledge base, including sources Verity does not have.</p>` : ''}${editable && dataset.cases.length > 1 ? `<button class="review-delete js-delete-scenario" data-index="${index}" type="button">Remove scenario</button>` : ''}<div class="form-grid"><div class="field full"><label>Customer question or scenario</label><textarea data-field="question" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.question || '')}</textarea></div><div class="field full"><label>Expected answer</label><textarea data-field="expectedAnswer" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.expectedAnswer || '')}</textarea></div><div class="field"><label>Required points (one per line)</label><textarea data-field="requiredPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.requiredPoints || []).join('\n'))}</textarea></div><div class="field"><label>Forbidden points (one per line)</label><textarea data-field="forbiddenPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.forbiddenPoints || []).join('\n'))}</textarea></div>${rubricCheckMarkup(rubricCheckFor(dataset, item), index, editable)}${dataset.documentKind === 'website' ? `<div class="field full"><label>Website page URL${isDecline(item) ? ' (optional)' : ''}</label><input data-field="sourceUrl" data-index="${index}" value="${escapeHtml(item.sourceUrl || '')}" ${editable ? '' : 'readonly'} /></div>` : ''}<div class="field full"><label>${isDecline(item) ? 'Nearby passage (optional, the closest thing the source does say)' : 'Source evidence'}</label><textarea data-field="sourceEvidence" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.sourceEvidence || '')}</textarea></div><details class="review-advanced" ${hasAdvanced(item) ? 'open' : ''}><summary>Advanced: multi-turn conversation (optional)</summary><div class="form-grid"><div class="field full"><label>Conversation turns (JSON, optional)</label><textarea data-field="turns" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='[{"userMessage":"...","expectedAnswer":"...","requiredPoints":[],"forbiddenPoints":[],"sourceEvidence":"..."}]'>${escapeHtml((item.turns || []).length ? JSON.stringify(item.turns, null, 2) : '')}</textarea></div><div class="field full"><label>Expected final memory (JSON string array, optional)</label><textarea data-field="expectedFinalMemory" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='["name: Sam", "city: Boston"]'>${escapeHtml((item.expectedFinalMemory || []).length ? JSON.stringify(item.expectedFinalMemory, null, 2) : '')}</textarea></div></div></details></div></fieldset>`,
+        `<fieldset id="review-case-${index}" class="review-case" ${index === active ? '' : 'hidden'}><legend>Scenario ${index + 1} of ${dataset.cases.length}</legend>${isDecline(item) ? `${declineTag(item)}<input type="hidden" data-field="caseType" data-index="${index}" value="decline" /><input type="hidden" data-field="declineKind" data-index="${index}" value="${escapeHtml(item.declineKind || 'close-but-missing')}" /><p class="help">The agent should say it does not have this information, or offer to connect the customer with staff, without inventing details. Check it is not answered anywhere in the agent’s knowledge base, including sources Verity does not have.</p>` : ''}${editable && dataset.cases.length > 1 ? `<button class="review-delete js-delete-scenario" data-index="${index}" type="button">Remove scenario</button>` : ''}<div class="form-grid"><div class="field full"><label>Customer question or scenario</label><textarea data-field="question" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.question || '')}</textarea></div><div class="field full"><label>Expected answer</label><textarea data-field="expectedAnswer" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.expectedAnswer || '')}</textarea></div><div class="field"><label>Required points (one per line)</label><textarea data-field="requiredPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.requiredPoints || []).join('\n'))}</textarea></div><div class="field"><label>Forbidden points (one per line)</label><textarea data-field="forbiddenPoints" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml((item.forbiddenPoints || []).join('\n'))}</textarea></div>${rubricCheckMarkup(rubricCheckFor(dataset, item), index, editable)}${isDecline(item) ? `${dataset.documentKind === 'website' ? `<div class="field full"><label>Website page URL (optional)</label><input data-field="sourceUrl" data-index="${index}" value="${escapeHtml(item.sourceUrl || '')}" ${editable ? '' : 'readonly'} /></div>` : ''}<div class="field full"><label>Nearby passage (optional, the closest thing the source does say)</label><textarea data-field="sourceEvidence" data-index="${index}" ${editable ? '' : 'readonly'}>${escapeHtml(item.sourceEvidence || '')}</textarea></div>` : reviewPassagesMarkup(casePassages(item), index, editable, dataset.documentKind === 'website')}<details class="review-advanced" ${hasAdvanced(item) ? 'open' : ''}><summary>Advanced: multi-turn conversation (optional)</summary><div class="form-grid"><div class="field full"><label>Conversation turns (JSON, optional)</label><textarea data-field="turns" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='[{"userMessage":"...","expectedAnswer":"...","requiredPoints":[],"forbiddenPoints":[],"sourceEvidence":"..."}]'>${escapeHtml((item.turns || []).length ? JSON.stringify(item.turns, null, 2) : '')}</textarea></div><div class="field full"><label>Expected final memory (JSON string array, optional)</label><textarea data-field="expectedFinalMemory" data-index="${index}" ${editable ? '' : 'readonly'} placeholder='["name: Sam", "city: Boston"]'>${escapeHtml((item.expectedFinalMemory || []).length ? JSON.stringify(item.expectedFinalMemory, null, 2) : '')}</textarea></div></div></details></div></fieldset>`,
     )
     .join('');
   const list = dataset.cases
@@ -1148,7 +1194,7 @@ function render(page = location.hash.slice(1).split(':')[0] || 'home', { refresh
   if (!canWriteWorkspace())
     app
       .querySelectorAll(
-        '#file-input, #technical-file-input, .js-remove-dataset, #website-form input, #website-form button, #generate-form button, .manual-evaluation-form button, .js-source-dataset, .js-remove-document, .js-recrawl-website, .js-remove-website, .js-remove-technical-document, .js-approve, .js-add-scenario, .js-delete-scenario, #dataset-review-form button[type="submit"], #dataset-review-form textarea, #dataset-review-form input',
+        '#file-input, #technical-file-input, .js-remove-dataset, #website-form input, #website-form button, #generate-form button, .manual-evaluation-form button, .js-source-dataset, .js-remove-document, .js-recrawl-website, .js-remove-website, .js-remove-technical-document, .js-approve, .js-add-scenario, .js-delete-scenario, .js-add-passage, .js-remove-passage, #dataset-review-form button[type="submit"], #dataset-review-form textarea, #dataset-review-form input',
       )
       .forEach(input => {
         input.disabled = true;
@@ -1477,6 +1523,21 @@ function bind(page) {
       updateRubricFlag(index, target.dataset.point, point => {
         point.kept = true;
       });
+  });
+  document.querySelector('#dataset-review-form')?.addEventListener('click', event => {
+    const target = event.target.closest('.js-passage-tab, .js-passage-jump, .js-add-passage, .js-remove-passage');
+    if (!target) return;
+    const index = Number(target.dataset.index);
+    const passage = Number(target.dataset.passage);
+    if (target.matches('.js-add-passage')) addReviewPassage(index);
+    else if (target.matches('.js-remove-passage')) removeReviewPassage(index, passage);
+    else {
+      showReviewPassage(index, passage);
+      if (target.matches('.js-passage-jump'))
+        document
+          .querySelector(`#review-passages-${index} .review-passage[data-passage="${passage}"] textarea`)
+          ?.focus();
+    }
   });
   document.querySelector('#dataset-review-form')?.addEventListener('input', event => {
     const index = event.target.dataset?.index;
@@ -2227,8 +2288,19 @@ async function generateDataset(event) {
   }
 }
 
+// The passage boxes of one scenario as typed, hidden ones included: Passage 1 first, then 2 and 3 if present.
+function formPassages(form, index) {
+  const box = (field, passage) =>
+    form.querySelector(`[data-field="${field}"][data-index="${index}"]${passage ? `[data-passage="${passage}"]` : ''}`);
+  const passages = [{ text: box('sourceEvidence')?.value || '', sourceUrl: box('sourceUrl')?.value || '' }];
+  for (let passage = 2; passage <= MAX_REVIEW_PASSAGES; passage += 1) {
+    const text = box('passage', passage);
+    if (text) passages.push({ text: text.value, sourceUrl: box('passageUrl', passage)?.value || '' });
+  }
+  return passages;
+}
 function reviewedCases(form, dataset) {
-  return dataset.cases.map((item, index) => {
+  return dataset.cases.map((_item, index) => {
     const value = field => form.querySelector(`[data-field="${field}"][data-index="${index}"]`).value.trim();
     const json = field => {
       const raw = value(field);
@@ -2239,6 +2311,13 @@ function reviewedCases(form, dataset) {
       form.querySelector(`[data-field="caseType"][data-index="${index}"]`)?.value === 'decline'
         ? form.querySelector(`[data-field="declineKind"][data-index="${index}"]`)?.value
         : null;
+    const extraPassages = formPassages(form, index)
+      .slice(1)
+      .map(passage => ({
+        text: passage.text.trim(),
+        ...(passage.sourceUrl.trim() ? { sourceUrl: passage.sourceUrl.trim() } : {}),
+      }))
+      .filter(passage => passage.text);
     return {
       question: value('question'),
       expectedAnswer: value('expectedAnswer'),
@@ -2252,8 +2331,7 @@ function reviewedCases(form, dataset) {
         .filter(Boolean),
       sourceEvidence: value('sourceEvidence'),
       ...(sourceUrl ? { sourceUrl } : {}),
-      // The form edits Passage 1 only; Passages 2 and 3 are kept as they are.
-      ...(item.extraPassages?.length ? { extraPassages: item.extraPassages } : {}),
+      ...(extraPassages.length ? { extraPassages } : {}),
       turns: json('turns'),
       expectedFinalMemory: json('expectedFinalMemory'),
       ...(declineKind ? { caseType: 'decline', declineKind } : {}),
@@ -2383,6 +2461,48 @@ function refreshReviewListItem(index) {
       '<span class="review-list-flag" title="Question, expected answer, or source evidence is empty">Needs input</span>',
     );
   if (!incomplete && flag) flag.remove();
+}
+// Add and Remove redraw only this scenario's passage block from what is typed, so unsaved edits elsewhere survive.
+function redrawReviewPassages(index, passages, active) {
+  const dataset = workspace.datasets.find(item => item.id === reviewingDatasetId);
+  const block = document.querySelector(`#review-passages-${index}`);
+  if (!dataset || !block) return;
+  block.outerHTML = reviewPassagesMarkup(
+    passages,
+    index,
+    dataset.status !== 'approved',
+    dataset.documentKind === 'website',
+    active,
+  );
+  refreshReviewListItem(index);
+}
+function addReviewPassage(index) {
+  const form = document.querySelector('#dataset-review-form');
+  const passages = form ? formPassages(form, index) : [];
+  if (!passages.length || passages.length >= MAX_REVIEW_PASSAGES) return;
+  // A website passage starts on Passage 1's page; the reviewer changes the link if it comes from another page.
+  passages.push({ text: '', sourceUrl: passages[0].sourceUrl });
+  redrawReviewPassages(index, passages, passages.length - 1);
+  document.querySelector(`[data-field="passage"][data-index="${index}"][data-passage="${passages.length}"]`)?.focus();
+}
+function removeReviewPassage(index, passage) {
+  if (!window.confirm(`Remove Passage ${passage} from scenario ${index + 1}? It is removed when you save.`)) return;
+  const form = document.querySelector('#dataset-review-form');
+  const passages = form ? formPassages(form, index) : [];
+  if (passages.length < 2) return;
+  passages.splice(passage - 1, 1);
+  redrawReviewPassages(index, passages, Math.min(passage - 1, passages.length - 1));
+}
+// Switching only toggles which box shows; nothing is redrawn.
+function showReviewPassage(index, passage) {
+  const block = document.querySelector(`#review-passages-${index}`);
+  if (!block) return;
+  block.querySelectorAll('.review-passage').forEach(pane => {
+    pane.hidden = Number(pane.dataset.passage) !== passage;
+  });
+  block
+    .querySelectorAll('.js-passage-tab')
+    .forEach(tab => tab.setAttribute('aria-pressed', String(Number(tab.dataset.passage) === passage)));
 }
 function addDatasetScenario() {
   const dataset = workspace.datasets.find(item => item.id === reviewingDatasetId);

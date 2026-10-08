@@ -190,6 +190,20 @@ a { color: inherit; text-decoration: none; }
 .review-pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .review-detail .review-case { margin: 0; }
 .review-detail [data-field="sourceEvidence"] { min-height: 190px; }
+.review-passages-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.review-passages-label { font-size: 12px; font-weight: 700; }
+.review-passages .passage-switch { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; border-radius: 9px; background: var(--soft); }
+.review-passages .passage-tab, .review-passages .passage-add { min-height: 28px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; cursor: pointer; }
+.review-passages .passage-tab:hover { color: var(--ink); }
+.review-passages .passage-tab[aria-pressed="true"] { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px rgba(18, 38, 43, .12); }
+.review-passages .passage-add { color: var(--accent-dark); }
+.review-passages .passage-add:hover { background: rgba(255,255,255,.6); }
+.review-passages .passage-tab:focus-visible, .review-passages .passage-add:focus-visible { outline: 3px solid #f0b7a9; outline-offset: 1px; }
+.review-passage { display: grid; gap: 7px; }
+.review-passage label { display: grid; gap: 7px; }
+.review-passage textarea { min-height: 190px; }
+.review-passage .passage-remove { justify-self: end; border: 0; padding: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
+.review-passage .passage-remove:hover { color: var(--danger); }
 .review-advanced { grid-column: 1 / -1; border-top: 1px solid #e3ebe7; padding-top: 12px; }
 .review-advanced > summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; }
 .review-advanced[open] > summary { margin-bottom: 14px; color: var(--ink); }
