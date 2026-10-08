@@ -1196,6 +1196,39 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
         'an approved dataset shows flags without buttons',
       );
       assert.equal(rubricCheckMarkup(undefined, 0, true), '');
+      // A point found in another passage links to it, so the passage switch is one click away.
+      assert.match(
+        rubricCheckMarkup(
+          {
+            extraPassages: [{ text: 'B' }],
+            points: [{ point: 'P', supported: true, needed: true, quote: 'p', passages: [2] }],
+          },
+          3,
+          false,
+        ),
+        /<q>p<\/q><small>In <button class="rubric-jump js-passage-jump" data-index="3" data-passage="2" type="button">Passage 2<\/button><\/small><\/li>/,
+      );
+      assert.match(
+        rubricCheckMarkup(
+          {
+            extraPassages: [{ text: 'B' }, { text: 'C' }],
+            points: [{ point: 'P', supported: true, needed: true, passages: [1, 3] }],
+          },
+          0,
+          true,
+        ),
+        /<small>In <button[^>]*data-passage="1"[^>]*>Passage 1<\/button> and <button[^>]*data-passage="3"[^>]*>Passage 3<\/button><\/small>/,
+      );
+      assert.doesNotMatch(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: false, needed: true, passages: [] }] }, 0, true),
+        /js-passage-jump/,
+      );
+      assert.doesNotMatch(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: true, needed: true, passages: [1] }] }, 0, true),
+        /js-passage-jump/,
+        'a single-passage question needs no passage link',
+      );
+      assert.match(js, /if \(!pane\) return;/, 'a link to a removed passage leaves the boxes as they are');
       // Keep clears a flag and says so; a removed point disappears; neither counts as needing a look.
       const reviewed = {
         ...entry,
@@ -1282,10 +1315,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     )();
     const miss = { pass: false, gapDiagnosis: { categories: ['Likely retrieval miss'] }, answer: 'No.' };
     {
-      const reviewedCode = js.slice(
-        js.indexOf('function reviewedCases'),
-        js.indexOf('\n}\n', js.indexOf('function reviewedCases')) + 2,
-      );
+      const reviewedCode = topLevel(js, 'MAX_REVIEW_PASSAGES', 'formPassages', 'reviewedCases');
       const { reviewedCases } = new Function(`${reviewedCode}; return { reviewedCases };`)();
       const fields = {
         question: 'Rooftop pool?',
@@ -1310,10 +1340,151 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       delete fields.caseType;
       delete fields.declineKind;
       assert.equal('caseType' in reviewedCases(form, { cases: [{}] })[0], false);
-      // The review page edits Passage 1; Passages 2 and 3 survive a save untouched.
-      const extraPassages = [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }];
-      assert.deepEqual(reviewedCases(form, { cases: [{ extraPassages }] })[0].extraPassages, extraPassages);
+      // Passages 2 and 3 are read from their own boxes, in order, hidden or not; empty boxes are dropped.
       assert.equal('extraPassages' in reviewedCases(form, { cases: [{}] })[0], false);
+      const passageForm = {
+        querySelector: selector => {
+          const field = /data-field="([^"]+)"/.exec(selector)?.[1];
+          const passage = /data-passage="(\d)"/.exec(selector)?.[1];
+          const boxes = {
+            'passage-2': '  Pets must be on a lead. ',
+            'passageUrl-2': 'https://hotel.example/rules',
+            'passage-3': ' ',
+          };
+          if (passage) return `${field}-${passage}` in boxes ? { value: boxes[`${field}-${passage}`] } : null;
+          return field in fields ? { value: fields[field] } : null;
+        },
+      };
+      assert.deepEqual(
+        reviewedCases(passageForm, { cases: [{ extraPassages: [{ text: 'stale' }] }] })[0].extraPassages,
+        [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }],
+        'saving sends the boxes, not the stored passages',
+      );
+    }
+    // Review page passage boxes: Passage 1 keeps its field names; one passage shows at a time behind a switch.
+    {
+      const passageCode = topLevel(
+        js,
+        'MAX_REVIEW_PASSAGES',
+        'casePassages',
+        'reviewPassagesMarkup',
+        'evidenceSearchNote',
+      );
+      const { casePassages, reviewPassagesMarkup, evidenceSearchNote } = new Function(
+        `${helpers}\n${passageCode}; return { casePassages, reviewPassagesMarkup, evidenceSearchNote };`,
+      )();
+      assert.deepEqual(casePassages({ sourceEvidence: 'A', sourceUrl: 'https://x.example/a' }), [
+        { text: 'A', sourceUrl: 'https://x.example/a' },
+      ]);
+      assert.deepEqual(casePassages({}), [{ text: '', sourceUrl: '' }], 'a new scenario has one empty passage');
+      assert.deepEqual(
+        casePassages({ sourceEvidence: 'A', extraPassages: [{ text: 'B' }, { text: 'C', sourceUrl: 'u' }] }).map(
+          passage => passage.text,
+        ),
+        ['A', 'B', 'C'],
+      );
+
+      const one = reviewPassagesMarkup([{ text: 'Pets <only> downstairs.', sourceUrl: '' }], 2, true, false);
+      assert.match(one, /^<div id="review-passages-2" class="field full review-passages">/);
+      assert.match(
+        one,
+        /<textarea data-field="sourceEvidence" data-index="2" aria-label="Passage 1" >Pets &lt;only&gt; downstairs\.<\/textarea>/,
+      );
+      assert.match(
+        one,
+        /<button class="passage-tab js-passage-tab" data-index="2" data-passage="1" type="button" aria-pressed="true">Passage 1<\/button>/,
+      );
+      assert.match(
+        one,
+        /<button class="passage-add js-add-passage" data-index="2" type="button">\+ Add passage<\/button>/,
+      );
+      assert.doesNotMatch(one, /js-remove-passage/, 'a lone passage cannot be removed');
+      assert.doesNotMatch(one, /data-field="sourceUrl"/, 'policy sources have no page link');
+
+      const three = reviewPassagesMarkup(
+        [
+          { text: 'A', sourceUrl: '' },
+          { text: 'B <b>', sourceUrl: '' },
+          { text: 'C', sourceUrl: '' },
+        ],
+        0,
+        true,
+        false,
+        1,
+      );
+      assert.equal(three.match(/class="review-passage"/g).length, 3);
+      assert.match(three, /<div class="review-passage" data-passage="1" hidden>/);
+      assert.match(three, /<div class="review-passage" data-passage="2" >/, 'the chosen passage shows');
+      assert.match(
+        three,
+        /<textarea data-field="passage" data-passage="2" data-index="0" aria-label="Passage 2" >B &lt;b&gt;<\/textarea>/,
+      );
+      assert.match(three, /data-passage="2" type="button" aria-pressed="true">Passage 2</);
+      assert.doesNotMatch(three, /js-add-passage/, 'Add passage is hidden at three');
+      assert.match(
+        three,
+        /<button class="passage-remove js-remove-passage" data-index="0" data-passage="3" type="button">Remove Passage 3<\/button>/,
+      );
+      assert.equal(three.match(/js-remove-passage/g).length, 3);
+
+      const site = reviewPassagesMarkup(
+        [
+          { text: 'A', sourceUrl: 'https://hotel.example/a' },
+          { text: 'B', sourceUrl: 'https://hotel.example/"b"' },
+        ],
+        4,
+        true,
+        true,
+      );
+      assert.match(
+        site,
+        /<label>Page link<input data-field="sourceUrl" data-index="4" value="https:\/\/hotel\.example\/a" aria-label="Passage 1 page link" \/><\/label>/,
+      );
+      assert.match(
+        site,
+        /<input data-field="passageUrl" data-passage="2" data-index="4" value="https:\/\/hotel\.example\/&quot;b&quot;" aria-label="Passage 2 page link" \/>/,
+      );
+
+      const approved = reviewPassagesMarkup(
+        [
+          { text: 'A', sourceUrl: '' },
+          { text: 'B', sourceUrl: '' },
+        ],
+        0,
+        false,
+        false,
+      );
+      assert.match(approved, /aria-label="Passage 1" readonly>A</);
+      assert.match(approved, /js-passage-tab/, 'approved datasets can still switch passages');
+      assert.doesNotMatch(approved, /js-add-passage|js-remove-passage/);
+      assert.doesNotMatch(
+        reviewPassagesMarkup([{ text: 'A', sourceUrl: '' }], 0, false, false),
+        /passage-switch/,
+        'a lone read-only passage needs no switch',
+      );
+
+      assert.equal(evidenceSearchNote({}), '');
+      assert.equal(evidenceSearchNote({ evidenceSearch: 'used', status: 'draft' }), '');
+      assert.equal(evidenceSearchNote({ evidenceSearch: 'unavailable', status: 'approved' }), '');
+      assert.match(
+        evidenceSearchNote({ evidenceSearch: 'unavailable', status: 'draft' }),
+        /^<p id="evidence-search-note" class="rubric-note" role="note"><b>Evidence search unavailable\.<\/b> /,
+      );
+      assert.match(js, /\$\{evidenceSearchNote\(dataset\)\}\$\{declineCheckNote\(dataset\)\}/);
+      // Should-decline cards keep their single Nearby passage box; everything else gets the passage boxes.
+      assert.match(
+        js,
+        /<label>Nearby passage \(optional, the closest thing the source does say\)<\/label><textarea data-field="sourceEvidence"/,
+      );
+      assert.match(
+        js,
+        /reviewPassagesMarkup\(casePassages\(item\), index, editable, dataset\.documentKind === 'website'\)/,
+      );
+      // Add, Remove and switching change only that scenario's passage block, so unsaved edits elsewhere survive.
+      assert.match(js, /closest\('\.js-passage-tab, \.js-passage-jump, \.js-add-passage, \.js-remove-passage'\)/);
+      assert.match(js, /window\.confirm\(`Remove Passage \$\{passage\} from scenario/);
+      assert.match(js, /\.js-add-passage, \.js-remove-passage, #dataset-review-form button\[type="submit"\]/);
+      assert.match(css, /\.review-passages \.passage-switch \{/);
     }
     {
       const coverageCode = js.slice(js.indexOf('function coverageMarkup'), js.indexOf('function declineCheckNote'));
