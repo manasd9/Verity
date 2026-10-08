@@ -1013,10 +1013,13 @@ function validateWebsiteCases(source, cases) {
   if (source.kind !== 'website') return cases;
   return cases.map(item => {
     if (item.caseType === 'decline') return item;
-    if (!item.sourceUrl) throw new Error('Every website scenario needs a source page URL.');
-    const page = source.pages.find(value => value.url === item.sourceUrl);
-    if (!page || !hasSourceEvidence(page.text, item.sourceEvidence))
-      throw new Error('Website evidence must be an exact excerpt from its saved source page.');
+    // Each passage links to its own page, so one question's evidence can span several pages.
+    for (const passage of [{ text: item.sourceEvidence, sourceUrl: item.sourceUrl }, ...(item.extraPassages || [])]) {
+      if (!passage.sourceUrl) throw new Error('Every website scenario needs a source page URL.');
+      const page = source.pages.find(value => value.url === passage.sourceUrl);
+      if (!page || !hasSourceEvidence(page.text, passage.text))
+        throw new Error('Website evidence must be an exact excerpt from its saved source page.');
+    }
     return item;
   });
 }

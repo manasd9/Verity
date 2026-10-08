@@ -3750,6 +3750,57 @@ try {
       [[{ text: 'Pets must be on a lead in shared areas.' }], undefined],
       'a hand-written turn keeps its passages, and a one-passage turn keeps its old shape',
     );
+
+    // Website passages may come from different pages; each keeps its own link and must be an excerpt of that page.
+    const siteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    siteStore.websiteSnapshots.push({
+      id: 'site_passages',
+      websiteId: 'site_passages_web',
+      kind: 'website',
+      name: 'hotel.example',
+      status: 'complete',
+      pages: [
+        { id: 'p1', url: 'https://hotel.example/rooms', title: 'Rooms', text: 'Pets stay in ground-floor rooms only.' },
+        { id: 'p2', url: 'https://hotel.example/rules', title: 'Rules', text: 'Pets must be on a lead.' },
+        { id: 'p3', url: 'https://hotel.example/parking', title: 'Parking', text: 'Valet parking only.' },
+      ],
+    });
+    const siteCase = {
+      question: 'Can I bring my dog?',
+      expectedAnswer: 'Yes, ground floor, on a lead.',
+      requiredPoints: [],
+      forbiddenPoints: [],
+      sourceEvidence: 'Pets stay in ground-floor rooms only.',
+      sourceUrl: 'https://hotel.example/rooms',
+      turns: [],
+      expectedFinalMemory: [],
+    };
+    siteStore.datasets.push({
+      id: 'dataset_site_passages',
+      documentId: 'site_passages',
+      documentKind: 'website',
+      status: 'draft',
+      cases: [siteCase],
+    });
+    writeFileSync(testStorePath, JSON.stringify(siteStore));
+    const twoPages = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+      cases: [
+        { ...siteCase, extraPassages: [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }] },
+      ],
+    });
+    assert.equal(twoPages.status, 200);
+    assert.deepEqual(twoPages.body.cases[0].extraPassages, [
+      { text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' },
+    ]);
+    for (const [extra, why] of [
+      [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'not an excerpt of its page'],
+      [{ text: 'Pets must be on a lead.' }, 'no page link'],
+    ]) {
+      const rejected = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+        cases: [{ ...siteCase, extraPassages: [extra] }],
+      });
+      assert.equal(rejected.status, 400, `a website passage with ${why} is rejected`);
+    }
   }
   await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000004' });
   assert.equal((await requestApp(listener, 'DELETE', `/api/documents/${scopedDocument.body.id}`)).status, 400);
