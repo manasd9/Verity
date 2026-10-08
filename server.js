@@ -1552,7 +1552,7 @@ app.use((req, res, next) => {
   usageContext.run(meter, next);
 });
 app.get('/vendor/livekit-client.js', (req, res) =>
-  res.sendFile(path.join(root, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js')),
+  res.sendFile(path.join('node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js'), { root }),
 );
 for (const [route, file] of [
   ['/', 'index.html'],
@@ -1563,7 +1563,8 @@ for (const [route, file] of [
   ['/styles.css', 'styles.css'],
   ['/verity-logo.svg', 'verity-logo.svg'],
 ])
-  app.get(route, (req, res) => res.sendFile(path.join(root, file)));
+  // Relative to root, so a checkout inside a dot folder (such as .claude/worktrees) is still served.
+  app.get(route, (req, res) => res.sendFile(file, { root }));
 app.get('/api/version', (req, res) => res.json(verityVersion()));
 app.get('/api/state', (req, res) => {
   const store = readStore();
