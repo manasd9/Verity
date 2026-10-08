@@ -284,6 +284,8 @@ assert.match(js, /const next = workspace\.technicalDocuments\.find\(inSelectedWo
 assert.match(js, /<aside class="sources-add"><div><h2>Add a source<\/h2>/);
 assert.match(js, /<form id="website-form" class="sources-website">/);
 assert.doesNotMatch(js, /What happens next<\/h3>/);
+// Toasts sit above sticky page bars (such as the dataset review's Save/Approve bar) but under the update banner.
+assert.match(css, /\.toast \{ opacity: 0; pointer-events: none; position: fixed; z-index: 40;/);
 // The Sources entrance animation only runs when the system allows motion.
 assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.sources-item/);
 assert.match(js, /Crawl website/);
