@@ -463,6 +463,7 @@ function sourceIndexedCases(raw, sources) {
     .map(item =>
       normalizeDatasetCase({
         ...item,
+        extraPassages: undefined,
         sourceEvidence: sources[Number(item.sourceIndex) - 1].text,
         ...(sources[Number(item.sourceIndex) - 1].sourceUrl
           ? { sourceUrl: sources[Number(item.sourceIndex) - 1].sourceUrl }
@@ -1123,6 +1124,32 @@ async function ensureTechnicalIndexed(store, document, control) {
   store.chunks = latest.chunks;
   saveStore(latest);
 }
+// A policy document uploaded without an OpenAI connection has no search vectors. Its first draft indexes it,
+// saved exactly as an upload's would be. The caller's store is left as it was, so this draft's checks are unchanged.
+async function ensurePolicyIndexed(store, document, control) {
+  if (store.chunks.some(chunk => chunk.documentId === document.id)) return;
+  const chunks = chunkText(document.text);
+  const vectors = await embedAll(
+    control,
+    chunks.map(chunk => chunk.text),
+    'Indexing',
+  );
+  if (!chunks.length || vectors.length !== chunks.length) return;
+  const latest = readStore();
+  if (!latest.documents.some(item => item.id === document.id)) return;
+  if (latest.chunks.some(chunk => chunk.documentId === document.id)) return;
+  latest.chunks.push(
+    ...chunks.map((chunk, index) => ({
+      id: id('chunk'),
+      documentId: document.id,
+      documentKind: 'policy',
+      ...chunk,
+      vector: vectors[index],
+      createdAt: new Date().toISOString(),
+    })),
+  );
+  saveStore(latest);
+}
 function policyContext(chunks) {
   return chunks.map((item, index) => `[Policy section ${index + 1}]\n${item.text}`).join('\n\n');
 }
@@ -1437,12 +1464,14 @@ async function checkDeclineCases(store, source, control, cases, signal) {
 // the evidence (or the passage after it) that state the point, and says whether the question asks for it. Verity
 // verifies each quote by text match, so support cannot be invented. It only flags; nothing is removed.
 // An entry is either { item, passages } (the passages to check, Passage 1 first, each { text, sourceUrl? }) or, for a
-// question with a single passage, { item, previous, next } with the passages around it in the source.
-function rubricCheckEntries(cases, sources) {
+// question with a single passage, { item, previous, next } with the passages around it in the source. A draft whose
+// evidence came from search (passageList) checks every question over its passages, even one that kept only Passage 1,
+// since that passage may be merged and no longer one of the source's cuts.
+function rubricCheckEntries(cases, sources, passageList = false) {
   return cases
     .filter(item => item.caseType !== 'decline' && !item.turns?.length && item.requiredPoints.length)
     .map(item => {
-      if (item.extraPassages?.length) return { item, passages: evidencePassages(item) };
+      if (passageList || item.extraPassages?.length) return { item, passages: evidencePassages(item) };
       const at = sources.findIndex(source => source.text === item.sourceEvidence);
       // Passages are cut every 500 characters, so a rule can start in the passage before the evidence or end after it.
       const neighbour = offset => {
@@ -1555,6 +1584,124 @@ function narrowPassageCheck(checked, keep) {
         passages: supported ? point.passages.map(number => numbers.indexOf(number) + 1) : [],
       };
     }),
+  };
+}
+// Evidence by search. After a draft's questions are written, each one is searched for in its own source's
+// 500-character passages (embedded once per draft). The top hits, always including the passage the question was
+// written from, are the candidates the rubric check sees; neighbouring hits on the same page are joined, at most
+// three at a time, so a rule cut at a boundary comes back whole. The check keeps the candidates it quotes from.
+const EVIDENCE_SEARCH_STEP = 'Evidence search';
+const EVIDENCE_CANDIDATES = 6;
+const MAX_JOINED_PASSAGES = 3;
+const MAX_EVIDENCE_CHARACTERS = 3000;
+function evidenceQuery(item) {
+  return [item.question, item.expectedAnswer, ...item.requiredPoints].join(' ');
+}
+// The candidates for one question, Passage 1 first (the block holding the passage it was written from), then the
+// other blocks by their best search rank. Each is { text, sourceUrl? }, an exact excerpt of its source or page.
+function evidenceCandidates(source, passages, vectors, origin, queryVector) {
+  const hits = passages
+    .map((passage, at) => ({ at, score: cosineSimilarity(queryVector, vectors[at]) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, EVIDENCE_CANDIDATES)
+    .map(hit => hit.at);
+  if (!hits.includes(origin)) hits.splice(EVIDENCE_CANDIDATES - 1, 1, origin);
+  const runs = [];
+  for (const at of [...hits].sort((a, b) => a - b)) {
+    const run = runs.at(-1);
+    if (run && run.at(-1) === at - 1 && passages[at].sourceUrl === passages[at - 1].sourceUrl) run.push(at);
+    else runs.push([at]);
+  }
+  const split = run =>
+    Array.from({ length: Math.ceil(run.length / MAX_JOINED_PASSAGES) }, (_, index) =>
+      run.slice(index * MAX_JOINED_PASSAGES, (index + 1) * MAX_JOINED_PASSAGES),
+    );
+  const blocks = runs.flatMap(run => {
+    const where = run.indexOf(origin);
+    if (where < 0) return split(run);
+    // A long run keeps the passage it was written from near the middle of its block.
+    const from = Math.min(Math.max(where - 1, 0), Math.max(run.length - MAX_JOINED_PASSAGES, 0));
+    return [
+      run.slice(from, from + MAX_JOINED_PASSAGES),
+      ...split(run.slice(0, from)),
+      ...split(run.slice(from + MAX_JOINED_PASSAGES)),
+    ];
+  });
+  const rank = block => Math.min(...block.map(at => hits.indexOf(at)));
+  const first = blocks.find(block => block.includes(origin));
+  const rest = blocks.filter(block => block !== first).sort((a, b) => rank(a) - rank(b));
+  return [first, ...rest].map(block => {
+    const { sourceUrl } = passages[block[0]];
+    const text = sourceUrl ? source.pages.find(page => page.url === sourceUrl).text : source.text;
+    return {
+      text: text.slice(passages[block[0]].start, passages[block.at(-1)].end).trim(),
+      ...(sourceUrl ? { sourceUrl } : {}),
+    };
+  });
+}
+// The candidate numbers to keep after the check: those its supported points quote from, most-quoted first, then by
+// search rank, within three passages and about 3,000 characters in total. Passage 1 always stays.
+function quotedCandidates(candidates, checked) {
+  const cited = new Map();
+  for (const point of checked.points)
+    if (point.supported)
+      for (const number of point.passages) if (number > 1) cited.set(number, (cited.get(number) || 0) + 1);
+  const keep = [];
+  let characters = candidates[0].text.length;
+  for (const number of [...cited.keys()].sort((a, b) => cited.get(b) - cited.get(a) || a - b)) {
+    if (keep.length >= MAX_PASSAGES - 1) break;
+    if (characters + candidates[number - 1].text.length > MAX_EVIDENCE_CHARACTERS) continue;
+    keep.push(number);
+    characters += candidates[number - 1].text.length;
+  }
+  return keep;
+}
+// Searches every written question's own source and lets the rubric check choose its evidence. Returns the cases with
+// their evidence set and the rubric check over it, or null when the search cannot run (the caller falls back).
+async function searchEvidence({ source, passages, passageVectors, connection, control, cases, signal }) {
+  const vectors = await passageVectors;
+  if (vectors?.length !== passages.length) return null;
+  const searchable = cases.filter(item => !item.turns.length);
+  if (!searchable.length) return { cases };
+  let queryVectors;
+  try {
+    queryVectors = await embed(connection, searchable.map(evidenceQuery), EVIDENCE_SEARCH_STEP);
+  } catch {
+    return null;
+  }
+  const candidatesFor = new Map(
+    searchable.map((item, index) => {
+      const origin = passages.findIndex(
+        passage => passage.text === item.sourceEvidence && passage.sourceUrl === item.sourceUrl,
+      );
+      return [item, origin < 0 ? null : evidenceCandidates(source, passages, vectors, origin, queryVectors[index])];
+    }),
+  );
+  const withPassage1 = cases.map(item => {
+    const candidates = candidatesFor.get(item);
+    return candidates ? { ...item, sourceEvidence: candidates[0].text } : item;
+  });
+  const entries = withPassage1
+    .map((item, index) => ({ item, passages: candidatesFor.get(cases[index]) }))
+    .filter(entry => entry.passages && entry.item.requiredPoints.length);
+  if (!entries.length) return { cases: withPassage1 };
+  let checks;
+  try {
+    const raw = await callModel(control, rubricCheckMessages(entries), true, { signal, step: 'Rubric check' });
+    checks = applyRubricCheck(entries, raw).map((checked, index) =>
+      narrowPassageCheck(checked, quotedCandidates(entries[index].passages, checked)),
+    );
+  } catch (error) {
+    // Without the check nothing chose the other candidates, so each question keeps Passage 1.
+    return { cases: withPassage1, rubricCheck: { error: error.message } };
+  }
+  const checkFor = new Map(entries.map((entry, index) => [entry.item, checks[index]]));
+  return {
+    cases: withPassage1.map(item => {
+      const extraPassages = checkFor.get(item)?.extraPassages;
+      return extraPassages ? { ...item, extraPassages } : item;
+    }),
+    rubricCheck: { checkedAt: new Date().toISOString(), cases: checks },
   };
 }
 function applyRubricCheck(entries, raw) {
@@ -2392,6 +2539,19 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const total = Math.min(Math.max(Math.round(Number(count)) || 10, 1), 30);
     const share = Math.min(Math.max(Number(declineShare) || 0, 0), 50);
     const declineCount = share ? Math.min(Math.max(Math.round((total * share) / 100), 1), total - 1) : 0;
+    // The evidence search embeds the passages while the questions are being written, so it adds little time.
+    const searchConnection = openAIControlConnection(store);
+    const passageVectors = searchConnection
+      ? embedAll(
+          searchConnection,
+          sources.map(source => source.text),
+          EVIDENCE_SEARCH_STEP,
+        ).catch(() => null)
+      : Promise.resolve(null);
+    const indexing =
+      searchConnection && store.documents.some(item => item.id === document.id)
+        ? ensurePolicyIndexed(store, document, searchConnection).catch(() => {})
+        : Promise.resolve();
     const raw = await callModel(
       connection,
       datasetGenerationMessages(
@@ -2404,12 +2564,29 @@ app.post('/api/datasets/generate', async (req, res, next) => {
     const answerCases = validateWebsiteCases(document, sourceIndexedCases(raw, sources));
     if (!answerCases.length)
       throw new Error('The control model did not cite any valid source passages. Please try again.');
-    const rubricEntries = rubricCheckEntries(answerCases, sources);
-    const rubricCheckRun = rubricEntries.length
-      ? callModel(connection, rubricCheckMessages(rubricEntries), true, { signal, step: 'Rubric check' })
-          .then(raw => ({ checkedAt: new Date().toISOString(), cases: applyRubricCheck(rubricEntries, raw) }))
-          .catch(error => ({ error: error.message }))
-      : Promise.resolve(undefined);
+    // Without the search (no OpenAI connection, or embedding failed) the draft is generated as before.
+    const todaysRubricCheck = () => {
+      const rubricEntries = rubricCheckEntries(answerCases, sources);
+      return rubricEntries.length
+        ? callModel(connection, rubricCheckMessages(rubricEntries), true, { signal, step: 'Rubric check' })
+            .then(raw => ({ checkedAt: new Date().toISOString(), cases: applyRubricCheck(rubricEntries, raw) }))
+            .catch(error => ({ error: error.message }))
+        : Promise.resolve(undefined);
+    };
+    const evidenceRun = searchEvidence({
+      source: document,
+      passages: sources,
+      passageVectors,
+      connection: searchConnection,
+      control: connection,
+      cases: answerCases,
+      signal,
+    }).then(async searched =>
+      searched
+        ? { evidenceSearch: 'used', ...searched }
+        : { evidenceSearch: 'unavailable', cases: answerCases, rubricCheck: await todaysRubricCheck() },
+    );
+    evidenceRun.catch(() => {}); // Awaited below, after the decline step; this only stops an early failure crashing.
     let declineCheck;
     let declines = [];
     if (declineCount) {
@@ -2434,8 +2611,9 @@ app.post('/api/datasets/generate', async (req, res, next) => {
         declineCheck = { requested: declineCount, kept: 0, dropped: [], error: error.message };
       }
     }
-    const cases = [...answerCases, ...declines];
-    const rubricCheck = await rubricCheckRun;
+    const { evidenceSearch, cases: answeredCases, rubricCheck } = await evidenceRun;
+    const cases = [...answeredCases, ...declines];
+    await indexing;
     const dataset = {
       id: id('dataset'),
       documentId,
@@ -2445,6 +2623,7 @@ app.post('/api/datasets/generate', async (req, res, next) => {
       ...(website ? { snapshotId: document.id } : {}),
       status: 'draft',
       cases,
+      evidenceSearch,
       ...(declineCheck ? { declineCheck } : {}),
       ...(rubricCheck ? { rubricCheck } : {}),
       createdAt: new Date().toISOString(),
@@ -2517,7 +2696,7 @@ app.post('/api/datasets/:id/recheck-rubric', async (req, res, next) => {
     if (!control) return res.status(400).json({ error: 'Connect a control model in Settings first.' });
     usageAboutDataset(store, dataset);
     const sources = source.kind === 'website' ? sourcePassages(source).slice(0, 120) : sourcePassages(source);
-    const entries = rubricCheckEntries(dataset.cases, sources);
+    const entries = rubricCheckEntries(dataset.cases, sources, dataset.evidenceSearch === 'used');
     let rubricCheck;
     try {
       rubricCheck = {
