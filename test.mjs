@@ -521,7 +521,7 @@ assert.deepEqual(
 assert.throws(
   () =>
     validateWebsiteCases(websiteSource, [{ sourceUrl: 'https://example.com/other', sourceEvidence: 'start at $20' }]),
-  /source page/,
+  /copied exactly from its page/,
 );
 const ranked = retrieveChunks(
   [
@@ -1388,6 +1388,11 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       assert.match(one, /^<div id="review-passages-2" class="field full review-passages">/);
       assert.match(
         one,
+        /<span class="review-passages-label">Evidence<\/span>/,
+        'the glossary word labels the passages',
+      );
+      assert.match(
+        one,
         /<textarea data-field="sourceEvidence" data-index="2" aria-label="Passage 1" >Pets &lt;only&gt; downstairs\.<\/textarea>/,
       );
       assert.match(
@@ -1783,6 +1788,14 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     js.match(/evidenceMarkup\((result|item)\.case, '[^']*'\)/g)?.length,
     2,
     'the results page and the report both use evidenceMarkup',
+  );
+  assert.match(js, /<summary>\$\{isDecline\(result\.case\) \? 'Nearby passage' : 'Evidence'\}<\/summary>/);
+  assert.match(js, /<h3>\$\{isDecline\(item\.case\) \? 'Nearby passage' : 'Evidence'\}<\/h3>/);
+  assert.match(js, /Check the evidence before approving\./);
+  assert.doesNotMatch(
+    js,
+    /: 'Source evidence'|>Source evidence<|Check the source evidence/,
+    'results, report and review say Evidence',
   );
 }
 
@@ -4219,7 +4232,7 @@ try {
       }
     }
 
-    // Website passages may come from different pages; each keeps its own link and must be an excerpt of that page.
+    // Website passages may come from different pages; each keeps its own link and must be exact text of that page.
     const siteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
     siteStore.websiteSnapshots.push({
       id: 'site_passages',
@@ -4266,13 +4279,15 @@ try {
       'a website question counts toward every page its passages link to',
     );
     for (const [extra, why] of [
-      [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'not an excerpt of its page'],
+      [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'text not on its page'],
       [{ text: 'Pets must be on a lead.' }, 'no page link'],
     ]) {
       const rejected = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
         cases: [{ ...siteCase, extraPassages: [extra] }],
       });
       assert.equal(rejected.status, 400, `a website passage with ${why} is rejected`);
+      if (extra.sourceUrl)
+        assert.equal(rejected.body.error, 'Website evidence must be text copied exactly from its page.');
     }
     // A conversation turn's passages follow the same rule: each is exact text of the page it links to. Turn
     // Passage 1 links to its own page when it names one, else to the scenario's.

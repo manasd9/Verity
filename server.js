@@ -1045,7 +1045,7 @@ function validateWebsiteCases(source, cases) {
       if (!passage.sourceUrl) throw new Error('Every website scenario needs a source page URL.');
       const page = source.pages.find(value => value.url === passage.sourceUrl);
       if (!page || !hasSourceEvidence(page.text, passage.text))
-        throw new Error('Website evidence must be an exact excerpt from its saved source page.');
+        throw new Error('Website evidence must be text copied exactly from its page.');
     }
     return item;
   });
@@ -1611,7 +1611,7 @@ function evidenceQuery(item) {
   return [item.question, item.expectedAnswer, ...item.requiredPoints].join(' ');
 }
 // The candidates for one question, Passage 1 first (the block holding the passage it was written from), then the
-// other blocks by their best search rank. Each is { text, sourceUrl? }, an exact excerpt of its source or page.
+// other blocks by their best search rank. Each is { text, sourceUrl? }, exact text of its source or page.
 function evidenceCandidates(source, passages, vectors, origin, queryVector) {
   const hits = passages
     .map((passage, at) => ({ at, score: cosineSimilarity(queryVector, vectors[at]) }))
