@@ -90,10 +90,12 @@ function usageAbout(fields) {
   const meter = usageContext.getStore();
   if (meter) Object.assign(meter.about, fields);
 }
+// Saves the entries recorded since the last save, so a request can be saved more than once (on close, then on end).
 function saveUsage(meter) {
-  if (!meter.entries.length) return;
+  const entries = meter.entries.splice(0);
+  if (!entries.length) return;
   const merged = new Map();
-  for (const entry of meter.entries) {
+  for (const entry of entries) {
     const key = `${entry.step}|${entry.model}`;
     const total = merged.get(key) || {
       step: entry.step,
@@ -1529,16 +1531,25 @@ app.use((req, res, next) => {
   const route = req.method === 'POST' && METERED_ROUTES.find(([pattern]) => pattern.test(req.path));
   if (!route) return next();
   const meter = { defaults: route[1], about: {}, entries: [] };
-  const end = res.end;
-  res.end = function (...args) {
-    res.end = end;
+  const save = () => {
     try {
       saveUsage(meter);
     } catch (error) {
       console.error('Usage could not be saved:', error.message);
     }
+  };
+  const end = res.end;
+  res.end = function (...args) {
+    res.end = end;
+    save();
     return end.apply(this, args);
   };
+  // The browser gave up before the reply (a cancelled draft): the calls already made are still billed, so save them.
+  res.on('close', () => {
+    if (res.writableEnded) return;
+    meter.about.cancelled = true;
+    save();
+  });
   usageContext.run(meter, next);
 });
 app.get('/vendor/livekit-client.js', (req, res) =>
@@ -2339,6 +2350,7 @@ app.put('/api/datasets/:id', (req, res) => {
 // Re-runs the rubric check on a draft's saved scenarios (the page saves the review first). Keep choices carry
 // over for points that did not change.
 // Prices per million tokens, per model, for the Usage page's cost estimates.
+app.get('/api/usage', (req, res) => res.json({ usage: readStore().usage }));
 app.put('/api/usage-prices', (req, res) => {
   const { model, input, output } = req.body;
   const price = value => (value === '' || value === undefined ? NaN : Number(value));

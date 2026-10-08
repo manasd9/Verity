@@ -2899,6 +2899,26 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     usageByDocument(usage, prices, [], [])[0].groups.find(group => group.title.startsWith('Draft')).title,
     'Draft (removed)',
   );
+  const cancelled = usageByDocument(
+    [
+      entry({
+        at: '2026-10-07T14:00:00Z',
+        step: 'Normal questions',
+        sourceId: 'doc_9',
+        sourceName: 'Spa.pdf',
+        cancelled: true,
+        inputTokens: 1000,
+      }),
+    ],
+    prices,
+    [],
+    [],
+  )[0];
+  assert.match(cancelled.groups[0].title, /^Cancelled draft · /, 'a cancelled draft is its own group');
+  assert.equal(cancelled.split.find(part => part.category === 'drafts').cost, cancelled.cost, 'it counts as drafts');
+  // The Usage page fetches the latest usage when it opens, so it shows what was spent since the page loaded.
+  assert.match(js, /if \(page === 'usage'\) refreshUsage\(\);/);
+  assert.match(js, /fetch\('\/api\/usage', \{ cache: 'no-store' \}\)/);
   const card = usageCard(harbor, prices);
   assert.match(
     card,
@@ -3381,6 +3401,17 @@ try {
         (await requestApp(listener, 'GET', '/api/state')).body.datasets.length,
         datasetsBefore,
         'a cancelled generation saves no draft',
+      );
+      const cancelledUsage = (await requestApp(listener, 'GET', '/api/usage')).body.usage.filter(
+        entry => entry.cancelled,
+      );
+      assert.ok(
+        cancelledUsage.some(entry => entry.step === 'Normal questions' && entry.calls === 1),
+        'a cancelled draft still records the calls it made before the cancel',
+      );
+      assert.ok(
+        cancelledUsage.every(entry => entry.sourceId === scopedDocument.body.id && !entry.datasetId),
+        'cancelled usage belongs to its source, with no draft',
       );
     } finally {
       pending?.destroy();

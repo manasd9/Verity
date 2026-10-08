@@ -943,7 +943,13 @@ function usageFormula(entry, prices) {
   );
 }
 function usageCategory(entry) {
-  return entry.evaluationId ? 'runs' : entry.datasetId ? 'drafts' : entry.sourceId ? 'indexing' : 'other';
+  return entry.evaluationId
+    ? 'runs'
+    : entry.datasetId || entry.cancelled
+      ? 'drafts'
+      : entry.sourceId
+        ? 'indexing'
+        : 'other';
 }
 // Groups the workspace's usage by document, then by upload, draft and run, newest first.
 function usageByDocument(usage, prices, datasets, evaluations) {
@@ -963,7 +969,9 @@ function usageByDocument(usage, prices, datasets, evaluations) {
           ? `run:${entry.evaluationId}`
           : entry.datasetId
             ? `draft:${entry.datasetId}`
-            : 'upload';
+            : entry.cancelled
+              ? `cancelled:${entry.at}`
+              : 'upload';
         if (!groups.has(groupKey)) groups.set(groupKey, []);
         groups.get(groupKey).push(entry);
       }
@@ -981,6 +989,8 @@ function usageByDocument(usage, prices, datasets, evaluations) {
           title = dataset
             ? `Draft · ${dataset.cases.length} ${dataset.cases.length === 1 ? 'scenario' : 'scenarios'}`
             : 'Draft (removed)';
+        } else if (groupKey.startsWith('cancelled:')) {
+          title = 'Cancelled draft · ' + when;
         } else if (groupKey.startsWith('run:')) {
           const run = evaluations.find(item => item.id === first.evaluationId);
           title =
@@ -1187,6 +1197,7 @@ function bindScope(page) {
 
 function bind(page) {
   bindScope(page);
+  if (page === 'usage') refreshUsage();
   document.querySelectorAll('[data-page]').forEach(link =>
     link.addEventListener('click', event => {
       event.preventDefault();
@@ -2594,6 +2605,18 @@ async function loadWorkspace() {
   } catch {
     /* The static preview is allowed before the local server starts. */
   }
+}
+
+// Uploads, drafts and runs save their usage on the server, so the Usage page fetches the latest when it opens.
+async function refreshUsage() {
+  try {
+    const response = await fetch('/api/usage', { cache: 'no-store' });
+    if (!response.ok) return;
+    const { usage } = await response.json();
+    if (JSON.stringify(usage) === JSON.stringify(workspace.usage)) return;
+    workspace.usage = usage;
+    if ((location.hash.slice(1).split(':')[0] || 'home') === 'usage') render('usage');
+  } catch {}
 }
 
 function toast(message) {
