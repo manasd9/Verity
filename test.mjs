@@ -4274,6 +4274,51 @@ try {
       });
       assert.equal(rejected.status, 400, `a website passage with ${why} is rejected`);
     }
+    // A conversation turn's passages follow the same rule: each is exact text of the page it links to. Turn
+    // Passage 1 links to its own page when it names one, else to the scenario's.
+    const turnCase = turn => ({
+      ...siteCase,
+      question: 'Pets, then parking',
+      turns: [
+        {
+          userMessage: 'Can I bring my dog?',
+          expectedAnswer: 'Yes, on a lead.',
+          requiredPoints: [],
+          forbiddenPoints: [],
+          sourceEvidence: 'Pets stay in ground-floor rooms only.',
+          ...turn,
+        },
+      ],
+    });
+    const goodTurn = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+      cases: [
+        turnCase({
+          extraPassages: [{ text: 'Valet parking only.', sourceUrl: 'https://hotel.example/parking' }],
+        }),
+        turnCase({ sourceEvidence: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }),
+      ],
+    });
+    assert.equal(goodTurn.status, 200, JSON.stringify(goodTurn.body));
+    assert.deepEqual(goodTurn.body.cases[0].turns[0].extraPassages, [
+      { text: 'Valet parking only.', sourceUrl: 'https://hotel.example/parking' },
+    ]);
+    assert.equal(goodTurn.body.cases[1].turns[0].sourceUrl, 'https://hotel.example/rules');
+    for (const [turn, why] of [
+      [{ extraPassages: [{ text: 'Valet parking only.', sourceUrl: 'https://hotel.example/rooms' }] }, 'another page'],
+      [{ extraPassages: [{ text: 'Valet parking only.' }] }, 'no page link'],
+      [{ sourceEvidence: 'Valet parking only.' }, 'Passage 1 from another page'],
+      [{ sourceEvidence: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'the wrong link'],
+    ]) {
+      const rejected = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+        cases: [turnCase(turn)],
+      });
+      assert.equal(rejected.status, 400, `a turn passage with ${why} is rejected`);
+    }
+    await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+      cases: [
+        { ...siteCase, extraPassages: [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }] },
+      ],
+    });
 
     // The judge sees every passage, labelled Passage 1 to 3; a one-passage question is judged exactly as before.
     const judgeStore = JSON.parse(readFileSync(testStorePath, 'utf8'));

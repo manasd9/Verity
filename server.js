@@ -516,6 +516,7 @@ function normalizeDatasetCase(item) {
       requiredPoints: points(turn.requiredPoints),
       forbiddenPoints: points(turn.forbiddenPoints),
       sourceEvidence: text(turn.sourceEvidence),
+      ...(text(turn.sourceUrl) ? { sourceUrl: text(turn.sourceUrl) } : {}),
       ...normalizeExtraPassages(turn.extraPassages),
     };
   });
@@ -1027,8 +1028,20 @@ function validateWebsiteCases(source, cases) {
   if (source.kind !== 'website') return cases;
   return cases.map(item => {
     if (item.caseType === 'decline') return item;
-    // Each passage links to its own page, so one question's evidence can span several pages.
-    for (const passage of [{ text: item.sourceEvidence, sourceUrl: item.sourceUrl }, ...(item.extraPassages || [])]) {
+    // Each passage links to its own page, so one question's evidence can span several pages. A conversation turn's
+    // passages follow the same rule; turn Passage 1 links to its own page when it names one, else to the scenario's,
+    // and a turn may have no evidence of its own.
+    const turnPassages = (item.turns || []).flatMap(turn => [
+      ...(String(turn.sourceEvidence || '').trim()
+        ? [{ text: turn.sourceEvidence, sourceUrl: turn.sourceUrl || item.sourceUrl }]
+        : []),
+      ...(turn.extraPassages || []),
+    ]);
+    for (const passage of [
+      { text: item.sourceEvidence, sourceUrl: item.sourceUrl },
+      ...(item.extraPassages || []),
+      ...turnPassages,
+    ]) {
       if (!passage.sourceUrl) throw new Error('Every website scenario needs a source page URL.');
       const page = source.pages.find(value => value.url === passage.sourceUrl);
       if (!page || !hasSourceEvidence(page.text, passage.text))
