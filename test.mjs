@@ -1199,20 +1199,36 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       // A point found in another passage links to it, so the passage switch is one click away.
       assert.match(
         rubricCheckMarkup(
-          { points: [{ point: 'P', supported: true, needed: true, quote: 'p', passages: [2] }] },
+          {
+            extraPassages: [{ text: 'B' }],
+            points: [{ point: 'P', supported: true, needed: true, quote: 'p', passages: [2] }],
+          },
           3,
           false,
         ),
         /<q>p<\/q><small>In <button class="rubric-jump js-passage-jump" data-index="3" data-passage="2" type="button">Passage 2<\/button><\/small><\/li>/,
       );
       assert.match(
-        rubricCheckMarkup({ points: [{ point: 'P', supported: true, needed: true, passages: [1, 3] }] }, 0, true),
+        rubricCheckMarkup(
+          {
+            extraPassages: [{ text: 'B' }, { text: 'C' }],
+            points: [{ point: 'P', supported: true, needed: true, passages: [1, 3] }],
+          },
+          0,
+          true,
+        ),
         /<small>In <button[^>]*data-passage="1"[^>]*>Passage 1<\/button> and <button[^>]*data-passage="3"[^>]*>Passage 3<\/button><\/small>/,
       );
       assert.doesNotMatch(
         rubricCheckMarkup({ points: [{ point: 'P', supported: false, needed: true, passages: [] }] }, 0, true),
         /js-passage-jump/,
       );
+      assert.doesNotMatch(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: true, needed: true, passages: [1] }] }, 0, true),
+        /js-passage-jump/,
+        'a single-passage question needs no passage link',
+      );
+      assert.match(js, /if \(!pane\) return;/, 'a link to a removed passage leaves the boxes as they are');
       // Keep clears a flag and says so; a removed point disappears; neither counts as needing a look.
       const reviewed = {
         ...entry,

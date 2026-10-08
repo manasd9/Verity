@@ -449,7 +449,7 @@ function rubricCheckMarkup(entry, index, editable) {
       // Multi-passage points name the passages they were found in; each name switches to that passage.
       const numbers = (point.passages || []).filter(number => Number.isInteger(number) && number > 0);
       const passage =
-        !where && numbers.length
+        !where && numbers.length && entry.extraPassages?.length
           ? `<small>In ${numbers
               .map(
                 number =>
@@ -2521,9 +2521,11 @@ function removeReviewPassage(index, passage) {
 // Switching only toggles which box shows; nothing is redrawn.
 function showReviewPassage(index, passage) {
   const block = document.querySelector(`#review-passages-${index}`);
-  if (!block) return;
-  block.querySelectorAll('.review-passage').forEach(pane => {
-    pane.hidden = Number(pane.dataset.passage) !== passage;
+  // A rubric link can name a passage removed since the last save; then nothing switches.
+  const pane = block?.querySelector(`.review-passage[data-passage="${passage}"]`);
+  if (!pane) return;
+  block.querySelectorAll('.review-passage').forEach(box => {
+    box.hidden = box !== pane;
   });
   block
     .querySelectorAll('.js-passage-tab')
