@@ -1630,13 +1630,22 @@ function evidenceCandidates(source, passages, vectors, origin, queryVector) {
   const rank = block => Math.min(...block.map(at => hits.indexOf(at)));
   const first = blocks.find(block => block.includes(origin));
   const rest = blocks.filter(block => block !== first).sort((a, b) => rank(a) - rank(b));
-  return [first, ...rest].map(block => {
+  const candidates = [first, ...rest].map(block => {
     const { sourceUrl } = passages[block[0]];
     const text = sourceUrl ? source.pages.find(page => page.url === sourceUrl).text : source.text;
     return {
       text: text.slice(passages[block[0]].start, passages[block.at(-1)].end).trim(),
       ...(sourceUrl ? { sourceUrl } : {}),
     };
+  });
+  // Cost cap: the rubric check sees at most about 3,000 characters per question. Passage 1 always goes first; a
+  // lower-ranked candidate that would pass the cap is left out. Six 500-character hits already stay close to it, so
+  // this guards the cap if the hit count or passage size changes.
+  let characters = 0;
+  return candidates.filter((candidate, index) => {
+    if (index && characters + candidate.text.length > MAX_EVIDENCE_CHARACTERS) return false;
+    characters += candidate.text.length;
+    return true;
   });
 }
 // The candidate numbers to keep after the check: those its supported points quote from, most-quoted first, then by

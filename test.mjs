@@ -4519,6 +4519,15 @@ try {
       ])
         assert.ok(prompt.includes(`PASSAGE ${number}: ${blocks[at]}`), `candidate ${number} is passage ${at}`);
       assert.doesNotMatch(prompt, /PREVIOUS PASSAGE|NEXT PASSAGE/);
+      // Cost cap: the check sees at most about 3,000 characters of candidate passages per question.
+      for (const question of prompt.split(/^QUESTION \d+: /m).slice(1)) {
+        const candidateText = [
+          ...question.matchAll(/^PASSAGE \d+: ([\s\S]*?)(?=\nPASSAGE \d+: |\n\n|\n<<<END |$(?![\s\S]))/gm),
+        ]
+          .map(match => match[1])
+          .join('');
+        assert.ok(candidateText.length > 0 && candidateText.length <= 3000, `${candidateText.length} characters`);
+      }
       const petsCheck = searched.body.rubricCheck.cases.find(entry => entry.question === pets.question);
       assert.deepEqual(
         petsCheck.points.map(point => [point.supported, point.passages]),
