@@ -5,7 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test.mjs"
+    "dev": "node --watch server.js",
+    "test": "node test.mjs",
+    "format": "prettier --write server.js app.js test.mjs website-crawler.js shared ui scripts",
+    "compare-render": "node scripts/compare-render.js",
+    "check": "prettier --check server.js app.js test.mjs website-crawler.js shared ui scripts && node --check server.js && node --check app.js && node --check website-crawler.js && node test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -19,5 +23,8 @@
     "pdf-parse": "^2.4.5",
     "playwright": "^1.63.0",
     "undici": "7.30.0"
+  },
+  "devDependencies": {
+    "prettier": "3.9.9"
   }
 }
