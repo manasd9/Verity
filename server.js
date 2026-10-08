@@ -480,6 +480,28 @@ const DECLINE_FORBIDDEN_POINTS = [
   'Promises or implies it can provide this information later, for example by asking a follow-up question to look it up',
   'Describes its internal steps or names internal documents',
 ];
+// Evidence is one to three passages. Passage 1 is sourceEvidence (with sourceUrl for websites); Passages 2 and 3
+// are extraPassages, present only when there are any, so older single-passage records keep their exact shape.
+const MAX_PASSAGES = 3;
+function evidencePassages(item) {
+  const first = String(item?.sourceEvidence || '').trim()
+    ? [{ text: item.sourceEvidence, ...(item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}) }]
+    : [];
+  return [...first, ...(item?.extraPassages || [])];
+}
+function normalizeExtraPassages(value) {
+  const text = entry => String(entry || '').trim();
+  if (value === undefined) return {};
+  if (!Array.isArray(value)) throw new Error('Extra passages must be an array.');
+  const passages = value
+    .map(passage => ({
+      text: text(passage?.text),
+      ...(text(passage?.sourceUrl) ? { sourceUrl: text(passage.sourceUrl) } : {}),
+    }))
+    .filter(passage => passage.text);
+  if (passages.length > MAX_PASSAGES - 1) throw new Error(`Evidence holds at most ${MAX_PASSAGES} passages.`);
+  return passages.length ? { extraPassages: passages } : {};
+}
 function normalizeDatasetCase(item) {
   const text = value => String(value || '').trim();
   const points = value => (Array.isArray(value) ? value.map(text).filter(Boolean) : []);
@@ -493,6 +515,7 @@ function normalizeDatasetCase(item) {
       requiredPoints: points(turn.requiredPoints),
       forbiddenPoints: points(turn.forbiddenPoints),
       sourceEvidence: text(turn.sourceEvidence),
+      ...normalizeExtraPassages(turn.extraPassages),
     };
   });
   if (item.expectedFinalMemory !== undefined && !Array.isArray(item.expectedFinalMemory))
@@ -500,6 +523,8 @@ function normalizeDatasetCase(item) {
   const expectedFinalMemory = (item.expectedFinalMemory || []).map(text).filter(Boolean);
   const decline = item.caseType === 'decline';
   if (decline && turns.length) throw new Error('A “should decline” scenario must be a single question.');
+  if (decline && normalizeExtraPassages(item.extraPassages).extraPassages)
+    throw new Error('A “should decline” scenario has one nearby passage at most.');
   const normalized = {
     question: text(item.question),
     expectedAnswer: text(item.expectedAnswer),
@@ -507,6 +532,7 @@ function normalizeDatasetCase(item) {
     forbiddenPoints: points(item.forbiddenPoints),
     sourceEvidence: text(item.sourceEvidence),
     ...(text(item.sourceUrl) ? { sourceUrl: text(item.sourceUrl) } : {}),
+    ...normalizeExtraPassages(item.extraPassages),
     turns,
     expectedFinalMemory,
     ...(decline

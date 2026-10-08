@@ -3650,6 +3650,107 @@ try {
   });
   assert.equal(websiteRun.status, 201);
   assert.equal(websiteRun.body.documentKind, 'website');
+  // Evidence holds one to three passages. Passage 1 stays in sourceEvidence (and sourceUrl); Passages 2 and 3 are
+  // extraPassages. Older records with one evidence text keep their exact shape.
+  {
+    const passageStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    const policyText = [
+      '1. Rooms',
+      'Every room has a kettle and a desk. Pets are allowed in ground-floor rooms only, for a $30 fee per night.',
+      '2. Policies',
+      'Pets must be on a lead in shared areas. Guests are responsible for any damage their pets cause.',
+      '3. Parking',
+      'Parking is valet only and costs $25 per night. The car park closes at midnight every day of the week.',
+    ].join('\n');
+    passageStore.documents.push({
+      id: 'doc_passages',
+      kind: 'policy',
+      name: 'Hotel manual',
+      text: policyText,
+      createdAt: new Date().toISOString(),
+    });
+    const petsCase = {
+      question: 'Can I bring my dog?',
+      expectedAnswer: 'Yes, in ground-floor rooms for $30 a night, on a lead in shared areas.',
+      requiredPoints: ['Ground-floor rooms only', 'On a lead in shared areas'],
+      forbiddenPoints: [],
+      sourceEvidence: 'Pets are allowed in ground-floor rooms only, for a $30 fee per night.',
+      turns: [],
+      expectedFinalMemory: [],
+    };
+    passageStore.datasets.push({
+      id: 'dataset_passages',
+      documentId: 'doc_passages',
+      documentKind: 'policy',
+      status: 'draft',
+      cases: [petsCase],
+    });
+    writeFileSync(testStorePath, JSON.stringify(passageStore));
+    const threePassages = {
+      ...petsCase,
+      extraPassages: [
+        { text: 'Pets must be on a lead in shared areas.' },
+        { text: 'Guests are responsible for any damage their pets cause.' },
+      ],
+    };
+    const savedPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [threePassages],
+    });
+    assert.equal(savedPassages.status, 200);
+    assert.equal(savedPassages.body.cases[0].sourceEvidence, petsCase.sourceEvidence, 'Passage 1 stays first');
+    assert.deepEqual(
+      savedPassages.body.cases[0].extraPassages,
+      threePassages.extraPassages,
+      'Passages 2 and 3 are kept in order',
+    );
+    const fourPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [
+        { ...threePassages, extraPassages: [...threePassages.extraPassages, { text: 'Kettles in every room.' }] },
+      ],
+    });
+    assert.equal(fourPassages.status, 400, 'a fourth passage is rejected');
+    assert.match(fourPassages.body.error, /at most 3 passages/);
+    const emptyFirst = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [{ ...threePassages, sourceEvidence: '' }],
+    });
+    assert.equal(emptyFirst.status, 400, 'a question with an empty Passage 1 still needs input');
+    const declineWithPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [
+        {
+          caseType: 'decline',
+          question: 'Is there a dog spa?',
+          expectedAnswer: 'Says it does not know.',
+          requiredPoints: ['Says it does not know'],
+          sourceEvidence: petsCase.sourceEvidence,
+          extraPassages: [{ text: 'Pets must be on a lead in shared areas.' }],
+        },
+      ],
+    });
+    assert.equal(declineWithPassages.status, 400, 'a should-decline question keeps a single nearby passage');
+    const turnPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [
+        {
+          question: 'Pets, then parking',
+          expectedAnswer: 'Both answered.',
+          turns: [
+            {
+              userMessage: 'Can I bring my dog?',
+              expectedAnswer: 'Yes, ground floor only.',
+              sourceEvidence: petsCase.sourceEvidence,
+              extraPassages: [{ text: 'Pets must be on a lead in shared areas.' }],
+            },
+            { userMessage: 'Where do I park?', expectedAnswer: 'Valet.', sourceEvidence: 'Parking is valet only' },
+          ],
+        },
+      ],
+    });
+    assert.equal(turnPassages.status, 200);
+    assert.deepEqual(
+      turnPassages.body.cases[0].turns.map(turn => turn.extraPassages),
+      [[{ text: 'Pets must be on a lead in shared areas.' }], undefined],
+      'a hand-written turn keeps its passages, and a one-passage turn keeps its old shape',
+    );
+  }
   await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000004' });
   assert.equal((await requestApp(listener, 'DELETE', `/api/documents/${scopedDocument.body.id}`)).status, 400);
   assert.equal(
