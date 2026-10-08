@@ -1,5 +1,92 @@
 # Verity improvement plan — 30 September 2026
 
+## Status — updated 8 October 2026
+
+| Item | Status | Commit |
+|---|---|---|
+| 1. Capture the full answer | **Done.** Live check with a slow tool still to do. | `61caea7` |
+| 2. Make the judge consistent | **Done.** 5-run consistency check on hold. | `ecc5416` |
+| 3. "Questions the docs don't answer" | **Done** and checked live on Marina. | `00c9beb` |
+| 3b. Suggest how many test cases | **Coverage view done.** Suggested count deferred. | `6c0e4e4` |
+| 4. Prompt versioning | **Out of scope.** Not being built. | — |
+| 5. Mark test chats | **For the FlexAgent team.** No Verity code. | — |
+
+**1. Capture the full answer**
+- Verity keeps every agent message after the question. It stops only when the agent is back to `listening`, no message is still arriving, and the agent has been quiet for 5 s (`LIVEKIT_QUIET_MS`).
+- The quiet period is 20 s while everything collected is short or filler-like.
+- Verity waits for the greeting to finish before asking.
+- Answers that are only filler, or very short, are flagged "answer may be incomplete" and left out of the run-level diagnosis. They still count in the score.
+- **Still to do:** a live run where a slow tool produces a filler line, then the real answer (Transit Planner, "Find the 22nd Ave Transit Center stop in BFT"). A normal live run on Marina captured all 10 answers in full.
+
+**2. Make the judge consistent**
+- When a control model is added, Verity makes tiny test calls to see whether it accepts a reasoning level and temperature 0, alone and together. This works for any OpenAI-compatible provider.
+- Judge calls (scoring and survey-fact extraction) send whatever the model accepts:
+  - a reasoning level set in Settings: Low, Medium or High (default Medium);
+  - temperature 0, where supported.
+- gpt-5.6-terra accepts a reasoning level but not temperature, so this judge grades as before. What's new is that the settings are pinned and recorded.
+- Every run records its judge model, host, reasoning level and temperature. Results show them and warn when the previous run of the same dataset was graded differently.
+- **On hold:** scoring one saved answer 5 times to measure how much this judge varies.
+
+**3. "Questions the docs don't answer"**
+- Generated datasets include "should decline" questions, 20% by default (a field on the generate form; 0 turns it off). There are three kinds: close but missing, wrong assumption, and off-topic.
+- One check call drops any question that another source in Verity answers.
+- Results show "Answers when it should" and "Declines when it should" beside the overall score.
+- Live run on Marina, 30 September: 72% overall, 65% answers, 100% declines (2 of 2).
+
+**3b. Suggest how many test cases**
+- **Done:** coverage view. It shows which sections (or website pages) of the source have questions, on draft review, results and the report.
+- **Done:** generation now spreads questions across sections, one per section before any section gets a second.
+- **Deferred:** the suggested question count. The default stays at 10 until clients use Verity, then we'll pick a sweet spot. Runs take longer now, so datasets should stay small.
+
+**Added along the way**
+- **PASS/GAP follows the rubric** (`b3142af`): an answer passes only if no required point is missed and nothing unsupported is claimed. The judge's own yes/no is kept as `judgePass`.
+- **Sources page fixes** (`ef0980c`, `1420322`):
+  - Disabled buttons look disabled and explain why: FlexAgent is disconnected.
+  - Long file names and list buttons no longer squeeze in narrow lists.
+
+**Since 1 October** (branch `verity-improvements`, not merged yet)
+- **Groundwork** (`7f7c932` to `0bf8313`):
+  - `npm run check` (Prettier, syntax, tests) runs as a pre-commit hook.
+  - The dev server restarts on edits, and the page offers a reload when Verity changes.
+  - Answer checks are shared between the server and the page, and the LiveKit capture moved to `ui/livekit-capture.js`.
+  - Malformed judge replies are rejected instead of scored.
+  - A render-comparison script proves page refactors change nothing.
+- **Redesign** (`b96c80e`, `0b60717`, `3b78436`): all eight pages share one layout with a dark action panel. The Sources page has one dataset action per source. Organization / Agent is a thin pill strip.
+- **Golden datasets:**
+  - A dataset can be removed (`6d2bce7`).
+  - A draft can be cancelled while it generates (`4db5e92`).
+  - "Should decline" questions get a stricter rubric (`a032512`).
+- **Rubric check** (`aebbb44`):
+  - Each new draft gets one extra check call. For every required point, it quotes the evidence that states it and says whether the question needs it.
+  - Verity verifies each quote by text match.
+  - The review page flags points that are "Not in the evidence" or "Not needed for this request", with Remove point, Keep and Re-check rubric.
+  - It only flags; nothing is removed automatically.
+- **Token usage** (`78a7da5`, `4f39836`, `fd47694`):
+  - Every model call is recorded with its tokens, under its source, draft or run: uploads, drafts, rubric checks and evaluations. Customer chat is not metered.
+  - The Usage page shows the estimated cost per document, with the calculation for each step. Prices per million tokens are set in Settings.
+  - The page refreshes when it opens, so a draft's cost shows right after generating it.
+  - Cancelled and failed drafts and runs still show what they spent.
+  - Estimates price all input at the full rate (no cached-input discount). OpenAI's dashboard is the bill of record.
+- **Fixes:**
+  - Forms find their submit button by type (`09740de`).
+  - Dead duplicate page functions are removed (`68b7365`).
+  - Scoped pages no longer blink on load (`ecba6ce`).
+  - Technical Blueprint shows only the selected workspace's documents (`0743b54`).
+  - The coverage summary counts uncovered sections instead of listing them (`25ebae6`).
+
+**Next, not started**
+- **Evidence by search:**
+  - Today a question is generated from one 500-character passage with no overlap, so rules get cut and answers spread across a document can't be evidenced.
+  - Proposal: search the whole source for each question's best passages and use those as its evidence. Related: allow up to 3 passages per question.
+- **Show FlexAgent's error** on a failed widget token request instead of a bare "(404)": 404 means the embed isn't published or enabled; 403 means Verity's origin isn't allowed.
+- **Customer chat with FlexAgent agents** over a LiveKit room. It fails today because it calls them like a model API; the smaller option is to hide them from the chat.
+
+**Known limits**
+- For FlexAgent runs, Verity sees only the final answer, not what FlexAgent's search retrieved. "Likely retrieval miss" is inferred from the answer, not measured. Retrieval traces come from the FlexAgent tool-evaluation work.
+- The "not answered elsewhere" check only covers sources uploaded to Verity, not anything else in the agent's FlexAgent knowledge base.
+
+---
+
 ## Why this plan
 
 Verity tests FlexAgent agents from the outside. It asks questions through the LiveKit widget, reads the answers, and has a judge model score them against rubrics. It does not need access to the client's code.
