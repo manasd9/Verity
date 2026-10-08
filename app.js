@@ -446,9 +446,16 @@ function rubricCheckMarkup(entry, index, editable) {
             : point.continues
               ? 'In the next passage'
               : '';
+      // Multi-passage points name the passages they were found in; each name switches to that passage.
+      const numbers = (point.passages || []).filter(number => Number.isInteger(number) && number > 0);
       const passage =
-        !where && Number.isInteger(point.passage) && point.passage > 0
-          ? `<small><button class="rubric-jump js-passage-jump" data-index="${index}" data-passage="${point.passage}" type="button">In Passage ${point.passage}</button></small>`
+        !where && numbers.length
+          ? `<small>In ${numbers
+              .map(
+                number =>
+                  `<button class="rubric-jump js-passage-jump" data-index="${index}" data-passage="${number}" type="button">Passage ${number}</button>`,
+              )
+              .join(' and ')}</small>`
           : '';
       return `<li class="${flags.length ? 'is-flagged' : 'is-ok'}"><span>${escapeHtml(point.point)}</span>${point.quote ? `<q>${escapeHtml(point.quote)}</q>` : ''}${where ? `<small>${escapeHtml(where)}</small>` : ''}${passage}${flags.length ? `<b>${escapeHtml(flags.join(' · '))}</b>` : ''}${actions}</li>`;
     })
@@ -549,9 +556,10 @@ function reviewPassagesMarkup(passages, index, editable, website, active = 0) {
     .join('');
   return `<div id="review-passages-${index}" class="field full review-passages"><div class="review-passages-head"><span class="review-passages-label">Source evidence</span>${switcher}</div>${panes}</div>`;
 }
-// Set on a draft generated without the evidence search; its questions then carry a single passage each.
+// A draft records evidenceSearch: 'used' or 'unavailable' (absent on older drafts); when unavailable its questions
+// carry a single passage each.
 function evidenceSearchNote(dataset) {
-  return dataset.evidenceSearchUnavailable && dataset.status !== 'approved'
+  return dataset.evidenceSearch === 'unavailable' && dataset.status !== 'approved'
     ? '<p id="evidence-search-note" class="rubric-note" role="note"><b>Evidence search unavailable.</b> Verity could not search the source when this draft was generated, so each question has one passage. Add passages by hand where an answer needs more.</p>'
     : '';
 }

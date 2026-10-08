@@ -1199,11 +1199,19 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       // A point found in another passage links to it, so the passage switch is one click away.
       assert.match(
         rubricCheckMarkup(
-          { points: [{ point: 'P', supported: true, needed: true, quote: 'p', passage: 2 }] },
+          { points: [{ point: 'P', supported: true, needed: true, quote: 'p', passages: [2] }] },
           3,
           false,
         ),
-        /<q>p<\/q><small><button class="rubric-jump js-passage-jump" data-index="3" data-passage="2" type="button">In Passage 2<\/button><\/small><\/li>/,
+        /<q>p<\/q><small>In <button class="rubric-jump js-passage-jump" data-index="3" data-passage="2" type="button">Passage 2<\/button><\/small><\/li>/,
+      );
+      assert.match(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: true, needed: true, passages: [1, 3] }] }, 0, true),
+        /<small>In <button[^>]*data-passage="1"[^>]*>Passage 1<\/button> and <button[^>]*data-passage="3"[^>]*>Passage 3<\/button><\/small>/,
+      );
+      assert.doesNotMatch(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: false, needed: true, passages: [] }] }, 0, true),
+        /js-passage-jump/,
       );
       // Keep clears a flag and says so; a removed point disappears; neither counts as needing a look.
       const reviewed = {
@@ -1440,9 +1448,10 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       );
 
       assert.equal(evidenceSearchNote({}), '');
-      assert.equal(evidenceSearchNote({ evidenceSearchUnavailable: true, status: 'approved' }), '');
+      assert.equal(evidenceSearchNote({ evidenceSearch: 'used', status: 'draft' }), '');
+      assert.equal(evidenceSearchNote({ evidenceSearch: 'unavailable', status: 'approved' }), '');
       assert.match(
-        evidenceSearchNote({ evidenceSearchUnavailable: true, status: 'draft' }),
+        evidenceSearchNote({ evidenceSearch: 'unavailable', status: 'draft' }),
         /^<p id="evidence-search-note" class="rubric-note" role="note"><b>Evidence search unavailable\.<\/b> /,
       );
       assert.match(js, /\$\{evidenceSearchNote\(dataset\)\}\$\{declineCheckNote\(dataset\)\}/);
