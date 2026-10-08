@@ -1183,8 +1183,8 @@ function sourceTopics(source) {
 const squash = text => String(text || '').replace(/\s+/g, ' ');
 // Finds the section a question tests: where its evidence sits in the source, and, when that passage spans
 // several sections, the one whose text best matches the question and its rubric.
-function coverageSection(topics, fullText, item) {
-  const evidence = squash(item.sourceEvidence || item.turns?.[0]?.sourceEvidence).trim();
+function coverageSection(topics, fullText, item, passage) {
+  const evidence = squash(passage).trim();
   if (!evidence) return -1;
   let at = fullText.indexOf(evidence);
   let length = evidence.length;
@@ -1226,12 +1226,20 @@ function datasetCoverage(store, dataset) {
   const unmatched = [];
   dataset.cases.forEach((item, index) => {
     if (item.caseType === 'decline') return; // a should-decline question does not test any section
-    const found =
+    // A question counts toward every section (or page) any of its passages falls in; a multi-turn scenario
+    // without its own evidence uses its first turn's.
+    const found = new Set(
       source.kind === 'website'
-        ? topics.findIndex(topic => topic.url === item.sourceUrl)
-        : coverageSection(topics, fullText, item);
-    if (found >= 0) topics[found].cases.push(index + 1);
-    else unmatched.push(index + 1);
+        ? [item.sourceUrl, ...(item.extraPassages || []).map(passage => passage.sourceUrl)].map(url =>
+            topics.findIndex(topic => topic.url === url),
+          )
+        : (evidencePassages(item).length ? evidencePassages(item) : evidencePassages(item.turns?.[0])).map(passage =>
+            coverageSection(topics, fullText, item, passage.text),
+          ),
+    );
+    found.delete(-1);
+    for (const at of [...found].sort((a, b) => a - b)) topics[at].cases.push(index + 1);
+    if (!found.size) unmatched.push(index + 1);
   });
   return {
     sections: topics.map(({ title, cases }) => ({ title, cases })),

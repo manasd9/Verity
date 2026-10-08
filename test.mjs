@@ -3654,13 +3654,14 @@ try {
   // extraPassages. Older records with one evidence text keep their exact shape.
   {
     const passageStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    const filler = ' Staff at the front desk can help with any question about this at any time of the day or night.';
     const policyText = [
       '1. Rooms',
-      'Every room has a kettle and a desk. Pets are allowed in ground-floor rooms only, for a $30 fee per night.',
+      `Every room has a kettle and a desk. Pets are allowed in ground-floor rooms only, for a $30 fee per night.${filler}`,
       '2. Policies',
-      'Pets must be on a lead in shared areas. Guests are responsible for any damage their pets cause.',
+      `Pets must be on a lead in shared areas. Guests are responsible for any damage their pets cause.${filler}`,
       '3. Parking',
-      'Parking is valet only and costs $25 per night. The car park closes at midnight every day of the week.',
+      `Parking is valet only and costs $25 per night. The car park closes at midnight every day of the week.${filler}`,
     ].join('\n');
     passageStore.documents.push({
       id: 'doc_passages',
@@ -3698,6 +3699,11 @@ try {
     });
     assert.equal(savedPassages.status, 200);
     assert.equal(savedPassages.body.cases[0].sourceEvidence, petsCase.sourceEvidence, 'Passage 1 stays first');
+    assert.deepEqual(
+      savedPassages.body.coverage.sections.map(section => section.cases),
+      [[1], [1], []],
+      'coverage counts the question toward every section its passages fall in',
+    );
     assert.deepEqual(
       savedPassages.body.cases[0].extraPassages,
       threePassages.extraPassages,
@@ -3792,6 +3798,11 @@ try {
     assert.deepEqual(twoPages.body.cases[0].extraPassages, [
       { text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' },
     ]);
+    assert.deepEqual(
+      twoPages.body.coverage.sections.map(section => section.cases),
+      [[1], [1], []],
+      'a website question counts toward every page its passages link to',
+    );
     for (const [extra, why] of [
       [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'not an excerpt of its page'],
       [{ text: 'Pets must be on a lead.' }, 'no page link'],
