@@ -3801,6 +3801,94 @@ try {
       });
       assert.equal(rejected.status, 400, `a website passage with ${why} is rejected`);
     }
+
+    // The judge sees every passage, labelled Passage 1 to 3; a one-passage question is judged exactly as before.
+    const judgeStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    judgeStore.datasets.push({
+      ...judgeStore.datasets.find(item => item.id === 'dataset_website_test'),
+      id: 'dataset_scoped_passages',
+      cases: [
+        {
+          question: 'What can riders request?',
+          expectedAnswer: 'A transit trip plan.',
+          requiredPoints: [],
+          forbiddenPoints: [],
+          sourceEvidence: 'Riders can request a transit trip plan.',
+          sourceUrl: 'https://transit.example/help',
+          extraPassages: [
+            { text: 'Plans are sent by email.', sourceUrl: 'https://transit.example/plans' },
+            { text: 'Plans are free.', sourceUrl: 'https://transit.example/fares' },
+          ],
+          turns: [],
+          expectedFinalMemory: [],
+        },
+      ],
+    });
+    writeFileSync(testStorePath, JSON.stringify(judgeStore));
+    const judgeRubrics = [];
+    const answeringFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options = {}) => {
+      if (String(url).endsWith('/chat/completions')) {
+        const body = JSON.parse(options.body);
+        if (body.messages[0].content.startsWith('Judge answers'))
+          judgeRubrics.push(JSON.parse(body.messages[1].content).rubric);
+      }
+      return answeringFetch(url, options);
+    };
+    try {
+      assert.equal((await requestApp(listener, 'POST', '/api/datasets/dataset_site_passages/approve')).status, 200);
+      const passagesManual = await requestApp(listener, 'POST', '/api/evaluations/manual', {
+        datasetId: 'dataset_site_passages',
+        controlConnectionId: control.body.id,
+        answers: ['Yes, ground floor, on a lead.'],
+      });
+      assert.equal(passagesManual.status, 201);
+      const passagesLivekit = await requestApp(listener, 'POST', '/api/evaluations/livekit', {
+        datasetId: 'dataset_scoped_passages',
+        targetConnectionId: selected.body.target.id,
+        controlConnectionId: control.body.id,
+        answers: ['Riders can request a transit trip plan.'],
+      });
+      assert.equal(passagesLivekit.status, 201);
+      const oneManual = await requestApp(listener, 'POST', '/api/evaluations/manual', {
+        datasetId: 'dataset_website_test',
+        controlConnectionId: control.body.id,
+        answers: ['A transit trip plan.'],
+      });
+      assert.equal(oneManual.status, 201);
+    } finally {
+      globalThis.fetch = answeringFetch;
+    }
+    assert.equal(judgeRubrics.length, 3);
+    assert.equal(
+      judgeRubrics[0].sourceEvidence,
+      'Passage 1 (https://hotel.example/rooms):\nPets stay in ground-floor rooms only.\n\n' +
+        'Passage 2 (https://hotel.example/rules):\nPets must be on a lead.',
+      'the manual route labels each passage with its page',
+    );
+    assert.equal(
+      judgeRubrics[1].sourceEvidence,
+      'Passage 1 (https://transit.example/help):\nRiders can request a transit trip plan.\n\n' +
+        'Passage 2 (https://transit.example/plans):\nPlans are sent by email.\n\n' +
+        'Passage 3 (https://transit.example/fares):\nPlans are free.',
+      'the LiveKit route labels Passage 1 to 3',
+    );
+    for (const rubric of judgeRubrics.slice(0, 2)) {
+      assert.equal(rubric.extraPassages, undefined, 'the labelled text replaces the separate passage fields');
+      assert.equal(rubric.sourceUrl, undefined);
+    }
+    assert.deepEqual(
+      judgeRubrics[2],
+      {
+        question: 'What can riders request?',
+        expectedAnswer: 'A transit trip plan.',
+        requiredPoints: [],
+        forbiddenPoints: [],
+        sourceEvidence: 'Riders can request a transit trip plan.',
+        sourceUrl: 'https://transit.example/help',
+      },
+      'a one-passage question sends the judge the same rubric as before',
+    );
   }
   await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000004' });
   assert.equal((await requestApp(listener, 'DELETE', `/api/documents/${scopedDocument.body.id}`)).status, 400);
