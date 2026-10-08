@@ -74,10 +74,13 @@
   - Technical Blueprint shows only the selected workspace's documents (`0743b54`).
   - The coverage summary counts uncovered sections instead of listing them (`25ebae6`).
 
+**Evidence by search** (branch `evidence-by-search`, 8 October)
+- A question's evidence is now one to three passages. After the questions are written, Verity searches the question's own source; the rubric check (no extra call) keeps the passages it quotes. Passage 1 is always the passage the question was written from, joined with matching neighbours so rules aren't cut.
+- The review page shows one passage at a time with a switch, Remove and "Add passage"; "Passage 2" in the rubric check jumps to it. The judge, results and report see every passage.
+- If the search can't run, the draft is generated as before and says "Evidence search unavailable". Approved datasets and "should decline" questions are unchanged.
+- Barwood check: 1 "Not in the evidence" flag out of 25 points. Cost $0.075 per 10-question draft vs $0.058 before (+29%, accepted); the extra is the rubric check writing more quotes.
+
 **Next, not started**
-- **Evidence by search:**
-  - Today a question is generated from one 500-character passage with no overlap, so rules get cut and answers spread across a document can't be evidenced.
-  - Proposal: search the whole source for each question's best passages and use those as its evidence. Related: allow up to 3 passages per question.
 - **Show FlexAgent's error** on a failed widget token request instead of a bare "(404)": 404 means the embed isn't published or enabled; 403 means Verity's origin isn't allowed.
 - **Customer chat with FlexAgent agents** over a LiveKit room. It fails today because it calls them like a model API; the smaller option is to hide them from the chat.
 

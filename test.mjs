@@ -284,6 +284,8 @@ assert.match(js, /const next = workspace\.technicalDocuments\.find\(inSelectedWo
 assert.match(js, /<aside class="sources-add"><div><h2>Add a source<\/h2>/);
 assert.match(js, /<form id="website-form" class="sources-website">/);
 assert.doesNotMatch(js, /What happens next<\/h3>/);
+// Toasts sit above sticky page bars (such as the dataset review's Save/Approve bar) but under the update banner.
+assert.match(css, /\.toast \{ opacity: 0; pointer-events: none; position: fixed; z-index: 40;/);
 // The Sources entrance animation only runs when the system allows motion.
 assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.sources-item/);
 assert.match(js, /Crawl website/);
@@ -521,7 +523,7 @@ assert.deepEqual(
 assert.throws(
   () =>
     validateWebsiteCases(websiteSource, [{ sourceUrl: 'https://example.com/other', sourceEvidence: 'start at $20' }]),
-  /source page/,
+  /copied exactly from its page/,
 );
 const ranked = retrieveChunks(
   [
@@ -1127,10 +1129,41 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
         'rubricWarningCount',
         'rubricCheckMarkup',
         'rubricCheckNote',
+        'rubricCheckKey',
+        'casePassages',
+        'keptRubricPoints',
       );
-      const { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber } = new Function(
-        `${helpers}\n${rubricCode}; return { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber };`,
+      const {
+        rubricCheckFor,
+        rubricWarningCount,
+        rubricCheckMarkup,
+        rubricCheckNote,
+        reviewListNumber,
+        keptRubricPoints,
+      } = new Function(
+        `${helpers}\n${rubricCode}; return { rubricCheckFor, rubricWarningCount, rubricCheckMarkup, rubricCheckNote, reviewListNumber, keptRubricPoints };`,
       )();
+      // A check over several passages belongs to the question with exactly those passages, in that order.
+      {
+        const extraPassages = [{ text: 'P2' }, { text: 'P3', sourceUrl: 'https://hotel.example/rules' }];
+        const multi = {
+          question: 'Q',
+          sourceEvidence: 'P1',
+          extraPassages,
+          points: [{ point: 'Lead', supported: true, passages: [2], needed: true, quote: 'on a lead', kept: true }],
+        };
+        const withMulti = { rubricCheck: { cases: [multi] } };
+        assert.equal(rubricCheckFor(withMulti, { question: 'Q', sourceEvidence: 'P1', extraPassages }), multi);
+        for (const item of [
+          { question: 'Q', sourceEvidence: 'P1' },
+          { question: 'Q', sourceEvidence: 'P1', extraPassages: [...extraPassages].reverse() },
+          { question: 'Q', sourceEvidence: 'P1', extraPassages: [{ text: 'P2 edited' }, extraPassages[1]] },
+        ])
+          assert.equal(rubricCheckFor(withMulti, item), undefined, 'changed passages have no check');
+        assert.deepEqual(keptRubricPoints(withMulti), [
+          { question: 'Q', sourceEvidence: 'P1', extraPassages, point: 'Lead' },
+        ]);
+      }
       const entry = {
         question: 'Q <1>',
         sourceEvidence: 'E',
@@ -1166,6 +1199,39 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
         'an approved dataset shows flags without buttons',
       );
       assert.equal(rubricCheckMarkup(undefined, 0, true), '');
+      // A point found in another passage links to it, so the passage switch is one click away.
+      assert.match(
+        rubricCheckMarkup(
+          {
+            extraPassages: [{ text: 'B' }],
+            points: [{ point: 'P', supported: true, needed: true, quote: 'p', passages: [2] }],
+          },
+          3,
+          false,
+        ),
+        /<q>p<\/q><small>In <button class="rubric-jump js-passage-jump" data-index="3" data-passage="2" type="button">Passage 2<\/button><\/small><\/li>/,
+      );
+      assert.match(
+        rubricCheckMarkup(
+          {
+            extraPassages: [{ text: 'B' }, { text: 'C' }],
+            points: [{ point: 'P', supported: true, needed: true, passages: [1, 3] }],
+          },
+          0,
+          true,
+        ),
+        /<small>In <button[^>]*data-passage="1"[^>]*>Passage 1<\/button> and <button[^>]*data-passage="3"[^>]*>Passage 3<\/button><\/small>/,
+      );
+      assert.doesNotMatch(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: false, needed: true, passages: [] }] }, 0, true),
+        /js-passage-jump/,
+      );
+      assert.doesNotMatch(
+        rubricCheckMarkup({ points: [{ point: 'P', supported: true, needed: true, passages: [1] }] }, 0, true),
+        /js-passage-jump/,
+        'a single-passage question needs no passage link',
+      );
+      assert.match(js, /if \(!pane\) return;/, 'a link to a removed passage leaves the boxes as they are');
       // Keep clears a flag and says so; a removed point disappears; neither counts as needing a look.
       const reviewed = {
         ...entry,
@@ -1252,10 +1318,7 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     )();
     const miss = { pass: false, gapDiagnosis: { categories: ['Likely retrieval miss'] }, answer: 'No.' };
     {
-      const reviewedCode = js.slice(
-        js.indexOf('function reviewedCases'),
-        js.indexOf('\n}\n', js.indexOf('function reviewedCases')) + 2,
-      );
+      const reviewedCode = topLevel(js, 'MAX_REVIEW_PASSAGES', 'formPassages', 'reviewedCases');
       const { reviewedCases } = new Function(`${reviewedCode}; return { reviewedCases };`)();
       const fields = {
         question: 'Rooftop pool?',
@@ -1280,6 +1343,156 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       delete fields.caseType;
       delete fields.declineKind;
       assert.equal('caseType' in reviewedCases(form, { cases: [{}] })[0], false);
+      // Passages 2 and 3 are read from their own boxes, in order, hidden or not; empty boxes are dropped.
+      assert.equal('extraPassages' in reviewedCases(form, { cases: [{}] })[0], false);
+      const passageForm = {
+        querySelector: selector => {
+          const field = /data-field="([^"]+)"/.exec(selector)?.[1];
+          const passage = /data-passage="(\d)"/.exec(selector)?.[1];
+          const boxes = {
+            'passage-2': '  Pets must be on a lead. ',
+            'passageUrl-2': 'https://hotel.example/rules',
+            'passage-3': ' ',
+          };
+          if (passage) return `${field}-${passage}` in boxes ? { value: boxes[`${field}-${passage}`] } : null;
+          return field in fields ? { value: fields[field] } : null;
+        },
+      };
+      assert.deepEqual(
+        reviewedCases(passageForm, { cases: [{ extraPassages: [{ text: 'stale' }] }] })[0].extraPassages,
+        [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }],
+        'saving sends the boxes, not the stored passages',
+      );
+    }
+    // Review page passage boxes: Passage 1 keeps its field names; one passage shows at a time behind a switch.
+    {
+      const passageCode = topLevel(
+        js,
+        'MAX_REVIEW_PASSAGES',
+        'casePassages',
+        'reviewPassagesMarkup',
+        'evidenceSearchNote',
+      );
+      const { casePassages, reviewPassagesMarkup, evidenceSearchNote } = new Function(
+        `${helpers}\n${passageCode}; return { casePassages, reviewPassagesMarkup, evidenceSearchNote };`,
+      )();
+      assert.deepEqual(casePassages({ sourceEvidence: 'A', sourceUrl: 'https://x.example/a' }), [
+        { text: 'A', sourceUrl: 'https://x.example/a' },
+      ]);
+      assert.deepEqual(casePassages({}), [{ text: '', sourceUrl: '' }], 'a new scenario has one empty passage');
+      assert.deepEqual(
+        casePassages({ sourceEvidence: 'A', extraPassages: [{ text: 'B' }, { text: 'C', sourceUrl: 'u' }] }).map(
+          passage => passage.text,
+        ),
+        ['A', 'B', 'C'],
+      );
+
+      const one = reviewPassagesMarkup([{ text: 'Pets <only> downstairs.', sourceUrl: '' }], 2, true, false);
+      assert.match(one, /^<div id="review-passages-2" class="field full review-passages">/);
+      assert.match(
+        one,
+        /<span class="review-passages-label">Evidence<\/span>/,
+        'the glossary word labels the passages',
+      );
+      assert.match(
+        one,
+        /<textarea data-field="sourceEvidence" data-index="2" aria-label="Passage 1" >Pets &lt;only&gt; downstairs\.<\/textarea>/,
+      );
+      assert.match(
+        one,
+        /<button class="passage-tab js-passage-tab" data-index="2" data-passage="1" type="button" aria-pressed="true">Passage 1<\/button>/,
+      );
+      assert.match(
+        one,
+        /<button class="passage-add js-add-passage" data-index="2" type="button">\+ Add passage<\/button>/,
+      );
+      assert.doesNotMatch(one, /js-remove-passage/, 'a lone passage cannot be removed');
+      assert.doesNotMatch(one, /data-field="sourceUrl"/, 'policy sources have no page link');
+
+      const three = reviewPassagesMarkup(
+        [
+          { text: 'A', sourceUrl: '' },
+          { text: 'B <b>', sourceUrl: '' },
+          { text: 'C', sourceUrl: '' },
+        ],
+        0,
+        true,
+        false,
+        1,
+      );
+      assert.equal(three.match(/class="review-passage"/g).length, 3);
+      assert.match(three, /<div class="review-passage" data-passage="1" hidden>/);
+      assert.match(three, /<div class="review-passage" data-passage="2" >/, 'the chosen passage shows');
+      assert.match(
+        three,
+        /<textarea data-field="passage" data-passage="2" data-index="0" aria-label="Passage 2" >B &lt;b&gt;<\/textarea>/,
+      );
+      assert.match(three, /data-passage="2" type="button" aria-pressed="true">Passage 2</);
+      assert.doesNotMatch(three, /js-add-passage/, 'Add passage is hidden at three');
+      assert.match(
+        three,
+        /<button class="passage-remove js-remove-passage" data-index="0" data-passage="3" type="button">Remove Passage 3<\/button>/,
+      );
+      assert.equal(three.match(/js-remove-passage/g).length, 3);
+
+      const site = reviewPassagesMarkup(
+        [
+          { text: 'A', sourceUrl: 'https://hotel.example/a' },
+          { text: 'B', sourceUrl: 'https://hotel.example/"b"' },
+        ],
+        4,
+        true,
+        true,
+      );
+      assert.match(
+        site,
+        /<label>Page link<input data-field="sourceUrl" data-index="4" value="https:\/\/hotel\.example\/a" aria-label="Passage 1 page link" \/><\/label>/,
+      );
+      assert.match(
+        site,
+        /<input data-field="passageUrl" data-passage="2" data-index="4" value="https:\/\/hotel\.example\/&quot;b&quot;" aria-label="Passage 2 page link" \/>/,
+      );
+
+      const approved = reviewPassagesMarkup(
+        [
+          { text: 'A', sourceUrl: '' },
+          { text: 'B', sourceUrl: '' },
+        ],
+        0,
+        false,
+        false,
+      );
+      assert.match(approved, /aria-label="Passage 1" readonly>A</);
+      assert.match(approved, /js-passage-tab/, 'approved datasets can still switch passages');
+      assert.doesNotMatch(approved, /js-add-passage|js-remove-passage/);
+      assert.doesNotMatch(
+        reviewPassagesMarkup([{ text: 'A', sourceUrl: '' }], 0, false, false),
+        /passage-switch/,
+        'a lone read-only passage needs no switch',
+      );
+
+      assert.equal(evidenceSearchNote({}), '');
+      assert.equal(evidenceSearchNote({ evidenceSearch: 'used', status: 'draft' }), '');
+      assert.equal(evidenceSearchNote({ evidenceSearch: 'unavailable', status: 'approved' }), '');
+      assert.match(
+        evidenceSearchNote({ evidenceSearch: 'unavailable', status: 'draft' }),
+        /^<p id="evidence-search-note" class="rubric-note" role="note"><b>Evidence search unavailable\.<\/b> /,
+      );
+      assert.match(js, /\$\{evidenceSearchNote\(dataset\)\}\$\{declineCheckNote\(dataset\)\}/);
+      // Should-decline cards keep their single Nearby passage box; everything else gets the passage boxes.
+      assert.match(
+        js,
+        /<label>Nearby passage \(optional, the closest thing the source does say\)<\/label><textarea data-field="sourceEvidence"/,
+      );
+      assert.match(
+        js,
+        /reviewPassagesMarkup\(casePassages\(item\), index, editable, dataset\.documentKind === 'website'\)/,
+      );
+      // Add, Remove and switching change only that scenario's passage block, so unsaved edits elsewhere survive.
+      assert.match(js, /closest\('\.js-passage-tab, \.js-passage-jump, \.js-add-passage, \.js-remove-passage'\)/);
+      assert.match(js, /window\.confirm\(`Remove Passage \$\{passage\} from scenario/);
+      assert.match(js, /\.js-add-passage, \.js-remove-passage, #dataset-review-form button\[type="submit"\]/);
+      assert.match(css, /\.review-passages \.passage-switch \{/);
     }
     {
       const coverageCode = js.slice(js.indexOf('function coverageMarkup'), js.indexOf('function declineCheckNote'));
@@ -1541,6 +1754,52 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
       unescaped.push(`${expression} after "${before.slice(-40)}"`);
   }
   assert.deepEqual(unescaped, [], 'Unescaped values in HTML templates');
+}
+// Results and the report show evidence the same way: one passage as before, two or three labelled Passage 1 to 3.
+{
+  const { evidenceMarkup } = new Function(
+    `${topLevel(js, 'HTML_ESCAPES', 'escapeHtml', 'safeHttpUrl', 'sourceLink', 'casePassages', 'evidenceMarkup')}; return { evidenceMarkup };`,
+  )();
+  const attributes = ' target="_blank" rel="noreferrer"';
+  assert.equal(
+    evidenceMarkup({ sourceEvidence: 'Pets <only> downstairs.', sourceUrl: 'https://hotel.example/rooms' }, attributes),
+    '<p>Pets &lt;only&gt; downstairs.</p><p><a href="https://hotel.example/rooms" target="_blank" rel="noreferrer">https://hotel.example/rooms</a></p>',
+    'a one-passage question renders exactly as before',
+  );
+  assert.equal(evidenceMarkup({ sourceEvidence: 'Pets downstairs.' }, ''), '<p>Pets downstairs.</p>');
+  const three = evidenceMarkup(
+    {
+      sourceEvidence: 'Pets downstairs.',
+      sourceUrl: 'https://hotel.example/rooms',
+      extraPassages: [
+        { text: 'Pets on a lead.', sourceUrl: 'https://hotel.example/rules' },
+        { text: 'Damage is charged.', sourceUrl: 'https://hotel.example/fees' },
+      ],
+    },
+    ' rel="noreferrer"',
+  );
+  assert.deepEqual(
+    [...three.matchAll(/<b>(Passage \d)<\/b>/g)].map(match => match[1]),
+    ['Passage 1', 'Passage 2', 'Passage 3'],
+  );
+  assert.match(
+    three,
+    /<b>Passage 2<\/b><\/p><p>Pets on a lead\.<\/p><p><a href="https:\/\/hotel\.example\/rules" rel="noreferrer">/,
+    'each passage carries its own page link',
+  );
+  assert.equal(
+    js.match(/evidenceMarkup\((result|item)\.case, '[^']*'\)/g)?.length,
+    2,
+    'the results page and the report both use evidenceMarkup',
+  );
+  assert.match(js, /<summary>\$\{isDecline\(result\.case\) \? 'Nearby passage' : 'Evidence'\}<\/summary>/);
+  assert.match(js, /<h3>\$\{isDecline\(item\.case\) \? 'Nearby passage' : 'Evidence'\}<\/h3>/);
+  assert.match(js, /Check the evidence before approving\./);
+  assert.doesNotMatch(
+    js,
+    /: 'Source evidence'|>Source evidence<|Check the source evidence/,
+    'results, report and review say Evidence',
+  );
 }
 
 // Outbound endpoint validation: public HTTPS only, resolved addresses checked, redirects re-validated.
@@ -2572,6 +2831,54 @@ assert.equal(multiTurnGapDiagnosis([{ pass: true }], { pass: true, missing: [] }
     'only the named point is kept; bad entries are ignored',
   );
   assert.deepEqual(markKeptRubricPoints(check, 'not a list'), check);
+
+  // Evidence by search hands the check candidate passages, learns which were quoted, then keeps only those.
+  const { narrowPassageCheck } = require('./server.js');
+  const candidates = [
+    { text: 'Pets are allowed in ground-floor rooms only.' },
+    { text: 'Parking is valet only and costs $25 per night.' },
+    { text: 'Pets must be on a lead in shared areas.', sourceUrl: 'https://hotel.example/rules' },
+    { text: 'Breakfast is served from 7 to 10 every day.' },
+  ];
+  const dog = normalizeDatasetCase({
+    question: 'Can I bring my dog?',
+    expectedAnswer: 'Yes, ground floor, on a lead.',
+    requiredPoints: ['Ground floor only', 'On a lead', 'Breakfast at 7'],
+    sourceEvidence: candidates[0].text,
+  });
+  const [overCandidates] = applyRubricCheck(
+    [{ item: dog, passages: candidates }],
+    reply([
+      {
+        question: 1,
+        points: [
+          { point: 1, quotes: [{ passage: 1, quote: 'ground-floor rooms only' }], needed: true },
+          { point: 2, quotes: [{ passage: 3, quote: 'on a lead in shared areas' }], needed: true },
+          { point: 3, quotes: [{ passage: 4, quote: 'served from 7 to 10' }], needed: false },
+        ],
+      },
+    ]),
+  );
+  assert.deepEqual(
+    overCandidates.points.map(point => point.passages),
+    [[1], [3], [4]],
+    'each point names the candidates it was quoted from',
+  );
+  const narrowed = narrowPassageCheck(overCandidates, [1, 3]);
+  assert.equal(narrowed.sourceEvidence, candidates[0].text);
+  assert.deepEqual(narrowed.extraPassages, [candidates[2]], 'only the kept passages remain, in order');
+  assert.deepEqual(
+    narrowed.points.map(point => [point.supported, point.passages, point.quote]),
+    [
+      [true, [1], 'ground-floor rooms only'],
+      [true, [2], 'on a lead in shared areas'],
+      [false, [], ''],
+    ],
+    'kept quotes are renumbered; a point quoted from a dropped passage is no longer supported',
+  );
+  assert.equal(narrowed.points[2].needed, false);
+  assert.equal(keepRubricCheck({ cases: [narrowed] }, [{ ...dog, extraPassages: [candidates[2]] }]).cases.length, 1);
+  assert.equal(narrowPassageCheck(overCandidates, [1]).extraPassages, undefined, 'Passage 1 alone keeps the old shape');
 }
 // Coverage: which sections of a source have questions.
 {
@@ -3650,6 +3957,863 @@ try {
   });
   assert.equal(websiteRun.status, 201);
   assert.equal(websiteRun.body.documentKind, 'website');
+  // Evidence holds one to three passages. Passage 1 stays in sourceEvidence (and sourceUrl); Passages 2 and 3 are
+  // extraPassages. Older records with one evidence text keep their exact shape.
+  {
+    const passageStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    const filler = ' Staff at the front desk can help with any question about this at any time of the day or night.';
+    const policyText = [
+      '1. Rooms',
+      `Every room has a kettle and a desk. Pets are allowed in ground-floor rooms only, for a $30 fee per night.${filler}`,
+      '2. Policies',
+      `Pets must be on a lead in shared areas. Guests are responsible for any damage their pets cause.${filler}`,
+      '3. Parking',
+      `Parking is valet only and costs $25 per night. The car park closes at midnight every day of the week.${filler}`,
+    ].join('\n');
+    passageStore.documents.push({
+      id: 'doc_passages',
+      kind: 'policy',
+      name: 'Hotel manual',
+      text: policyText,
+      createdAt: new Date().toISOString(),
+    });
+    const petsCase = {
+      question: 'Can I bring my dog?',
+      expectedAnswer: 'Yes, in ground-floor rooms for $30 a night, on a lead in shared areas.',
+      requiredPoints: ['Ground-floor rooms only', 'On a lead in shared areas'],
+      forbiddenPoints: [],
+      sourceEvidence: 'Pets are allowed in ground-floor rooms only, for a $30 fee per night.',
+      turns: [],
+      expectedFinalMemory: [],
+    };
+    passageStore.datasets.push({
+      id: 'dataset_passages',
+      documentId: 'doc_passages',
+      documentKind: 'policy',
+      status: 'draft',
+      cases: [petsCase],
+    });
+    writeFileSync(testStorePath, JSON.stringify(passageStore));
+    const threePassages = {
+      ...petsCase,
+      extraPassages: [
+        { text: 'Pets must be on a lead in shared areas.' },
+        { text: 'Guests are responsible for any damage their pets cause.' },
+      ],
+    };
+    const savedPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [threePassages],
+    });
+    assert.equal(savedPassages.status, 200);
+    assert.equal(savedPassages.body.cases[0].sourceEvidence, petsCase.sourceEvidence, 'Passage 1 stays first');
+    assert.deepEqual(
+      savedPassages.body.coverage.sections.map(section => section.cases),
+      [[1], [1], []],
+      'coverage counts the question toward every section its passages fall in',
+    );
+    assert.deepEqual(
+      savedPassages.body.cases[0].extraPassages,
+      threePassages.extraPassages,
+      'Passages 2 and 3 are kept in order',
+    );
+    const fourPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [
+        { ...threePassages, extraPassages: [...threePassages.extraPassages, { text: 'Kettles in every room.' }] },
+      ],
+    });
+    assert.equal(fourPassages.status, 400, 'a fourth passage is rejected');
+    assert.match(fourPassages.body.error, /at most 3 passages/);
+    const emptyFirst = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [{ ...threePassages, sourceEvidence: '' }],
+    });
+    assert.equal(emptyFirst.status, 400, 'a question with an empty Passage 1 still needs input');
+    const declineWithPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [
+        {
+          caseType: 'decline',
+          question: 'Is there a dog spa?',
+          expectedAnswer: 'Says it does not know.',
+          requiredPoints: ['Says it does not know'],
+          sourceEvidence: petsCase.sourceEvidence,
+          extraPassages: [{ text: 'Pets must be on a lead in shared areas.' }],
+        },
+      ],
+    });
+    assert.equal(declineWithPassages.status, 400, 'a should-decline question keeps a single nearby passage');
+    const turnPassages = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+      cases: [
+        {
+          question: 'Pets, then parking',
+          expectedAnswer: 'Both answered.',
+          turns: [
+            {
+              userMessage: 'Can I bring my dog?',
+              expectedAnswer: 'Yes, ground floor only.',
+              sourceEvidence: petsCase.sourceEvidence,
+              extraPassages: [{ text: 'Pets must be on a lead in shared areas.' }],
+            },
+            { userMessage: 'Where do I park?', expectedAnswer: 'Valet.', sourceEvidence: 'Parking is valet only' },
+          ],
+        },
+      ],
+    });
+    assert.equal(turnPassages.status, 200);
+    assert.deepEqual(
+      turnPassages.body.cases[0].turns.map(turn => turn.extraPassages),
+      [[{ text: 'Pets must be on a lead in shared areas.' }], undefined],
+      'a hand-written turn keeps its passages, and a one-passage turn keeps its old shape',
+    );
+
+    // The rubric check quotes required points from any of a question's passages, each quote verified against the
+    // passage it names. Re-check rubric checks only the passages on the question and never searches.
+    {
+      const rubricCalls = [];
+      let embeddingCalls = 0;
+      let rubricReply;
+      const passagesFetch = globalThis.fetch;
+      globalThis.fetch = async (url, options = {}) => {
+        if (String(url).endsWith('/embeddings')) embeddingCalls += 1;
+        if (String(url).endsWith('/chat/completions')) {
+          const body = JSON.parse(options.body);
+          if (body.messages[0].content.startsWith('You check test rubrics')) {
+            rubricCalls.push(body.messages[1].content);
+            return new Response(
+              JSON.stringify({ choices: [{ message: { content: JSON.stringify(rubricReply) } }], usage: mockUsage }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+        }
+        return passagesFetch(url, options);
+      };
+      const quoted = (...points) => ({
+        results: [{ question: 1, points: points.map((quotes, at) => ({ point: at + 1, quotes, needed: true })) }],
+      });
+      const recheck = () => requestApp(listener, 'POST', '/api/datasets/dataset_passages/recheck-rubric');
+      try {
+        assert.equal(
+          (await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', { cases: [threePassages] })).status,
+          200,
+        );
+        rubricReply = quoted(
+          [{ passage: 1, quote: 'Pets are allowed in ground-floor rooms only' }],
+          [{ passage: 2, quote: 'Pets must be on a lead in shared areas' }],
+        );
+        const checked = await recheck();
+        assert.equal(checked.status, 200);
+        assert.equal(embeddingCalls, 0, 'Re-check rubric makes no search call');
+        assert.match(rubricCalls[0], /PASSAGE 1: Pets are allowed in ground-floor rooms only/);
+        assert.match(rubricCalls[0], /PASSAGE 2: Pets must be on a lead in shared areas\./);
+        assert.match(rubricCalls[0], /PASSAGE 3: Guests are responsible for any damage their pets cause\./);
+        assert.doesNotMatch(rubricCalls[0], /PREVIOUS PASSAGE|NEXT PASSAGE|consecutive/);
+        const [entry] = checked.body.rubricCheck.cases;
+        assert.deepEqual(
+          entry.points.map(point => [point.point, point.supported, point.passages]),
+          [
+            ['Ground-floor rooms only', true, [1]],
+            ['On a lead in shared areas', true, [2]],
+          ],
+          'a point stated in Passage 2 is found there, not flagged "Not in the evidence"',
+        );
+        assert.ok(
+          entry.points.every(point => !('startsBefore' in point) && !('continues' in point)),
+          'multi-passage points have two outcomes: found in a passage, or not in the evidence',
+        );
+        assert.equal(entry.sourceEvidence, petsCase.sourceEvidence);
+        assert.deepEqual(entry.extraPassages, threePassages.extraPassages, 'the check is keyed by every passage');
+
+        rubricReply = quoted(
+          [{ passage: 1, quote: 'for a $30 fee per night. Pets must be on a lead' }],
+          [{ passage: 3, quote: 'Pets must be on a lead in shared areas' }],
+        );
+        const misquoted = await recheck();
+        assert.deepEqual(
+          misquoted.body.rubricCheck.cases[0].points.map(point => [point.supported, point.quote]),
+          [
+            [false, ''],
+            [false, ''],
+          ],
+          'a quote across two passages, or in a passage other than the one it names, is not support',
+        );
+
+        const flagged = misquoted.body.rubricCheck.cases[0];
+        const keptSave = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+          cases: [threePassages],
+          keptRubricPoints: [
+            {
+              question: flagged.question,
+              sourceEvidence: flagged.sourceEvidence,
+              extraPassages: flagged.extraPassages,
+              point: 'On a lead in shared areas',
+            },
+          ],
+        });
+        assert.deepEqual(
+          keptSave.body.rubricCheck.cases[0].points.map(point => Boolean(point.kept)),
+          [false, true],
+          'a Keep choice names the question and its passages',
+        );
+        const keptRechecked = await recheck();
+        assert.deepEqual(
+          keptRechecked.body.rubricCheck.cases[0].points.map(point => Boolean(point.kept)),
+          [false, true],
+          'a Keep choice survives a re-check',
+        );
+
+        for (const [extraPassages, why] of [
+          [[{ text: 'Pets must be on a lead in all shared areas.' }, threePassages.extraPassages[1]], 'edited'],
+          [[...threePassages.extraPassages].reverse(), 'reordered'],
+          [[threePassages.extraPassages[0]], 'removed'],
+        ]) {
+          const changed = await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+            cases: [{ ...threePassages, extraPassages }],
+          });
+          assert.equal(changed.status, 200);
+          assert.deepEqual(changed.body.rubricCheck.cases, [], `a check is dropped when a passage is ${why}`);
+          await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', { cases: [threePassages] });
+          await recheck();
+        }
+
+        // After a passage is removed, Re-check rubric checks the kept passages only.
+        await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', {
+          cases: [{ ...threePassages, extraPassages: [threePassages.extraPassages[0]] }],
+        });
+        rubricReply = quoted(
+          [{ passage: 1, quote: 'Pets are allowed in ground-floor rooms only' }],
+          [{ passage: 2, quote: 'Pets must be on a lead in shared areas' }],
+        );
+        const trimmed = await recheck();
+        assert.doesNotMatch(rubricCalls.at(-1), /PASSAGE 3|Guests are responsible/);
+        assert.deepEqual(
+          trimmed.body.rubricCheck.cases[0].points.map(point => point.supported),
+          [true, true],
+        );
+        assert.equal(embeddingCalls, 0, 'no re-check searched');
+
+        // A draft can mix questions with several passages and older questions with one.
+        const onePassage = {
+          ...petsCase,
+          question: 'Where do I park?',
+          expectedAnswer: 'Valet only, $25 a night.',
+          requiredPoints: ['Valet only'],
+          sourceEvidence: policyText.slice(policyText.indexOf('Parking is valet')),
+        };
+        await requestApp(listener, 'PUT', '/api/datasets/dataset_passages', { cases: [threePassages, onePassage] });
+        rubricReply = {
+          results: [
+            {
+              question: 1,
+              points: [
+                { point: 1, quotes: ['Pets are allowed in ground-floor rooms only'], needed: true },
+                { point: 2, quotes: [{ passage: 2, quote: 'Pets must be on a lead in shared areas' }], needed: true },
+              ],
+            },
+            { question: 2, points: [{ point: 1, quotes: ['Parking is valet only'], needed: true }] },
+          ],
+        };
+        const mixedCheck = await recheck();
+        const mixedPrompt = rubricCalls.at(-1);
+        assert.match(mixedPrompt, /QUESTION 1: Can I bring my dog\?[\s\S]*PASSAGE 3: Guests[\s\S]*QUESTION 2/);
+        assert.match(mixedPrompt, /QUESTION 2: Where do I park\?[\s\S]*PREVIOUS PASSAGE: [\s\S]*EVIDENCE: Parking/);
+        assert.match(mixedPrompt, /"quotes":\[\{"passage":1,"quote":""\}\]/, 'both reply shapes are shown');
+        assert.match(mixedPrompt, /"quotes":\[""\]/);
+        const [dogCheck, parkCheck] = mixedCheck.body.rubricCheck.cases;
+        assert.deepEqual(
+          dogCheck.points.map(point => [point.supported, point.passages]),
+          [
+            [false, []],
+            [true, [2]],
+          ],
+          'a quote that names no passage is not support',
+        );
+        assert.deepEqual(
+          parkCheck.points.map(point => [point.supported, point.startsBefore, point.continues]),
+          [[true, false, false]],
+          'a one-passage question keeps its previous and next passage notes',
+        );
+      } finally {
+        globalThis.fetch = passagesFetch;
+      }
+    }
+
+    // Website passages may come from different pages; each keeps its own link and must be exact text of that page.
+    const siteStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    siteStore.websiteSnapshots.push({
+      id: 'site_passages',
+      websiteId: 'site_passages_web',
+      kind: 'website',
+      name: 'hotel.example',
+      status: 'complete',
+      pages: [
+        { id: 'p1', url: 'https://hotel.example/rooms', title: 'Rooms', text: 'Pets stay in ground-floor rooms only.' },
+        { id: 'p2', url: 'https://hotel.example/rules', title: 'Rules', text: 'Pets must be on a lead.' },
+        { id: 'p3', url: 'https://hotel.example/parking', title: 'Parking', text: 'Valet parking only.' },
+      ],
+    });
+    const siteCase = {
+      question: 'Can I bring my dog?',
+      expectedAnswer: 'Yes, ground floor, on a lead.',
+      requiredPoints: [],
+      forbiddenPoints: [],
+      sourceEvidence: 'Pets stay in ground-floor rooms only.',
+      sourceUrl: 'https://hotel.example/rooms',
+      turns: [],
+      expectedFinalMemory: [],
+    };
+    siteStore.datasets.push({
+      id: 'dataset_site_passages',
+      documentId: 'site_passages',
+      documentKind: 'website',
+      status: 'draft',
+      cases: [siteCase],
+    });
+    writeFileSync(testStorePath, JSON.stringify(siteStore));
+    const twoPages = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+      cases: [
+        { ...siteCase, extraPassages: [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }] },
+      ],
+    });
+    assert.equal(twoPages.status, 200);
+    assert.deepEqual(twoPages.body.cases[0].extraPassages, [
+      { text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' },
+    ]);
+    assert.deepEqual(
+      twoPages.body.coverage.sections.map(section => section.cases),
+      [[1], [1], []],
+      'a website question counts toward every page its passages link to',
+    );
+    for (const [extra, why] of [
+      [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'text not on its page'],
+      [{ text: 'Pets must be on a lead.' }, 'no page link'],
+    ]) {
+      const rejected = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+        cases: [{ ...siteCase, extraPassages: [extra] }],
+      });
+      assert.equal(rejected.status, 400, `a website passage with ${why} is rejected`);
+      if (extra.sourceUrl)
+        assert.equal(rejected.body.error, 'Website evidence must be text copied exactly from its page.');
+    }
+    // A conversation turn's passages follow the same rule: each is exact text of the page it links to. Turn
+    // Passage 1 links to its own page when it names one, else to the scenario's.
+    const turnCase = turn => ({
+      ...siteCase,
+      question: 'Pets, then parking',
+      turns: [
+        {
+          userMessage: 'Can I bring my dog?',
+          expectedAnswer: 'Yes, on a lead.',
+          requiredPoints: [],
+          forbiddenPoints: [],
+          sourceEvidence: 'Pets stay in ground-floor rooms only.',
+          ...turn,
+        },
+      ],
+    });
+    const goodTurn = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+      cases: [
+        turnCase({
+          extraPassages: [{ text: 'Valet parking only.', sourceUrl: 'https://hotel.example/parking' }],
+        }),
+        turnCase({ sourceEvidence: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }),
+      ],
+    });
+    assert.equal(goodTurn.status, 200, JSON.stringify(goodTurn.body));
+    assert.deepEqual(goodTurn.body.cases[0].turns[0].extraPassages, [
+      { text: 'Valet parking only.', sourceUrl: 'https://hotel.example/parking' },
+    ]);
+    assert.equal(goodTurn.body.cases[1].turns[0].sourceUrl, 'https://hotel.example/rules');
+    for (const [turn, why] of [
+      [{ extraPassages: [{ text: 'Valet parking only.', sourceUrl: 'https://hotel.example/rooms' }] }, 'another page'],
+      [{ extraPassages: [{ text: 'Valet parking only.' }] }, 'no page link'],
+      [{ sourceEvidence: 'Valet parking only.' }, 'Passage 1 from another page'],
+      [{ sourceEvidence: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rooms' }, 'the wrong link'],
+    ]) {
+      const rejected = await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+        cases: [turnCase(turn)],
+      });
+      assert.equal(rejected.status, 400, `a turn passage with ${why} is rejected`);
+    }
+    await requestApp(listener, 'PUT', '/api/datasets/dataset_site_passages', {
+      cases: [
+        { ...siteCase, extraPassages: [{ text: 'Pets must be on a lead.', sourceUrl: 'https://hotel.example/rules' }] },
+      ],
+    });
+
+    // The judge sees every passage, labelled Passage 1 to 3; a one-passage question is judged exactly as before.
+    const judgeStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    judgeStore.datasets.push({
+      ...judgeStore.datasets.find(item => item.id === 'dataset_website_test'),
+      id: 'dataset_scoped_passages',
+      cases: [
+        {
+          question: 'What can riders request?',
+          expectedAnswer: 'A transit trip plan.',
+          requiredPoints: [],
+          forbiddenPoints: [],
+          sourceEvidence: 'Riders can request a transit trip plan.',
+          sourceUrl: 'https://transit.example/help',
+          extraPassages: [
+            { text: 'Plans are sent by email.', sourceUrl: 'https://transit.example/plans' },
+            { text: 'Plans are free.', sourceUrl: 'https://transit.example/fares' },
+          ],
+          turns: [],
+          expectedFinalMemory: [],
+        },
+      ],
+    });
+    writeFileSync(testStorePath, JSON.stringify(judgeStore));
+    const judgeRubrics = [];
+    const answeringFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options = {}) => {
+      if (String(url).endsWith('/chat/completions')) {
+        const body = JSON.parse(options.body);
+        if (body.messages[0].content.startsWith('Judge answers'))
+          judgeRubrics.push(JSON.parse(body.messages[1].content).rubric);
+      }
+      return answeringFetch(url, options);
+    };
+    try {
+      assert.equal((await requestApp(listener, 'POST', '/api/datasets/dataset_site_passages/approve')).status, 200);
+      const passagesManual = await requestApp(listener, 'POST', '/api/evaluations/manual', {
+        datasetId: 'dataset_site_passages',
+        controlConnectionId: control.body.id,
+        answers: ['Yes, ground floor, on a lead.'],
+      });
+      assert.equal(passagesManual.status, 201);
+      const passagesLivekit = await requestApp(listener, 'POST', '/api/evaluations/livekit', {
+        datasetId: 'dataset_scoped_passages',
+        targetConnectionId: selected.body.target.id,
+        controlConnectionId: control.body.id,
+        answers: ['Riders can request a transit trip plan.'],
+      });
+      assert.equal(passagesLivekit.status, 201);
+      const oneManual = await requestApp(listener, 'POST', '/api/evaluations/manual', {
+        datasetId: 'dataset_website_test',
+        controlConnectionId: control.body.id,
+        answers: ['A transit trip plan.'],
+      });
+      assert.equal(oneManual.status, 201);
+    } finally {
+      globalThis.fetch = answeringFetch;
+    }
+    assert.equal(judgeRubrics.length, 3);
+    assert.equal(
+      judgeRubrics[0].sourceEvidence,
+      'Passage 1 (https://hotel.example/rooms):\nPets stay in ground-floor rooms only.\n\n' +
+        'Passage 2 (https://hotel.example/rules):\nPets must be on a lead.',
+      'the manual route labels each passage with its page',
+    );
+    assert.equal(
+      judgeRubrics[1].sourceEvidence,
+      'Passage 1 (https://transit.example/help):\nRiders can request a transit trip plan.\n\n' +
+        'Passage 2 (https://transit.example/plans):\nPlans are sent by email.\n\n' +
+        'Passage 3 (https://transit.example/fares):\nPlans are free.',
+      'the LiveKit route labels Passage 1 to 3',
+    );
+    for (const rubric of judgeRubrics.slice(0, 2)) {
+      assert.equal(rubric.extraPassages, undefined, 'the labelled text replaces the separate passage fields');
+      assert.equal(rubric.sourceUrl, undefined);
+    }
+    assert.deepEqual(
+      judgeRubrics[2],
+      {
+        question: 'What can riders request?',
+        expectedAnswer: 'A transit trip plan.',
+        requiredPoints: [],
+        forbiddenPoints: [],
+        sourceEvidence: 'Riders can request a transit trip plan.',
+        sourceUrl: 'https://transit.example/help',
+      },
+      'a one-passage question sends the judge the same rubric as before',
+    );
+  }
+  // Evidence by search: after the questions are written, Verity embeds the source's passages once per draft,
+  // searches the question's own source for the passages that back it, and the rubric check keeps the ones it quotes.
+  {
+    const KEYWORDS = ['pets', 'lead', 'damage', 'parking'];
+    const count = (text, word) => text.toLowerCase().split(word).length - 1;
+    const vectorFor = text => [...KEYWORDS.map(word => count(text, word)), 0];
+    const filler =
+      ' Front desk staff are glad to help at any hour of the day or night with anything you need during your stay.';
+    const block = sentence => `${(sentence + filler.repeat(10)).slice(0, 497)}.`;
+    const sentences = [
+      'Kettles and desks are in every room.',
+      'Pets are allowed in ground-floor rooms only',
+      'Pets pay a nightly fee of thirty dollars',
+      'Breakfast is served from seven until ten.',
+      'Pets must be on a lead in shared areas',
+      'The spa opens at nine every morning.',
+      'Pets: owners pay for any damage caused',
+      'The garden closes at sunset.',
+      'Pets may not be left alone in rooms',
+      'Laundry is collected before noon.',
+      'Parking is valet only',
+      'Pets are welcome at the garden bar',
+    ];
+    const blocks = sentences.map(block);
+    const searchText = blocks.join('\n');
+    assert.deepEqual(
+      sourcePassages({ kind: 'policy', text: searchText }).map(passage => passage.text),
+      blocks,
+      'the fixture cuts into one 500-character passage per block',
+    );
+    const searchStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+    searchStore.documents.push({
+      id: 'doc_search',
+      kind: 'policy',
+      name: 'Search manual',
+      text: searchText,
+      characters: searchText.length,
+      createdAt: new Date().toISOString(),
+    });
+    writeFileSync(testStorePath, JSON.stringify(searchStore));
+    const petsQuestion = {
+      question: 'Can I bring pets?',
+      expectedAnswer: 'Pets stay in ground-floor rooms, on a lead, and owners pay for damage.',
+      requiredPoints: ['Ground-floor rooms only', 'On a lead in shared areas', 'Owners pay for damage', 'Never alone'],
+      forbiddenPoints: [],
+      sourceIndex: 2,
+    };
+    const parkingQuestion = {
+      question: 'Where do I park?',
+      expectedAnswer: 'Parking is valet only.',
+      requiredPoints: ['Valet only'],
+      forbiddenPoints: [],
+      sourceIndex: 11,
+    };
+    const embeddingInputs = [];
+    let failEmbeddings = false;
+    let failQueryEmbedding = false;
+    let failNextRubricCheck = false;
+    const rubricPrompts = [];
+    let rubricReply;
+    let websiteQuestions = [];
+    const searchFetch = globalThis.fetch;
+    const json = value =>
+      new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const chat = value => json({ choices: [{ message: { content: JSON.stringify(value) } }], usage: mockUsage });
+    globalThis.fetch = async (url, options = {}) => {
+      if (String(url).endsWith('/embeddings')) {
+        if (failEmbeddings) return new Response('embeddings down', { status: 500 });
+        const input = JSON.parse(options.body).input;
+        if (failQueryEmbedding && input.some(text => text.startsWith('Can I bring pets?')))
+          return new Response('embeddings down', { status: 500 });
+        embeddingInputs.push(input);
+        return json({
+          data: input.map(text => ({ embedding: vectorFor(text) })),
+          usage: { prompt_tokens: input.length * 100 },
+        });
+      }
+      if (String(url).endsWith('/chat/completions')) {
+        const body = JSON.parse(options.body);
+        const system = body.messages[0].content;
+        if (
+          system.startsWith('You create precise, source-grounded datasets') &&
+          body.messages[1].content.includes('Kettles')
+        )
+          return chat({ cases: [petsQuestion, parkingQuestion] });
+        if (
+          system.startsWith('You create precise, source-grounded datasets') &&
+          body.messages[1].content.includes('hotel-search.example')
+        )
+          return chat({ cases: websiteQuestions });
+        if (system.startsWith('You check test questions'))
+          return chat({
+            results: [...body.messages[1].content.matchAll(/^QUESTION (\d+):/gm)].map(match => ({
+              question: Number(match[1]),
+              answered: false,
+            })),
+          });
+        if (system.startsWith('You check test rubrics')) {
+          rubricPrompts.push(body.messages[1].content);
+          if (failNextRubricCheck) {
+            failNextRubricCheck = false;
+            return chat({ unexpected: true });
+          }
+          return chat(rubricReply);
+        }
+      }
+      return searchFetch(url, options);
+    };
+    const openai = await requestApp(listener, 'POST', '/api/connections', {
+      name: 'OpenAI',
+      role: 'control',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'test-model',
+      apiKey: 'test-key',
+    });
+    const generate = connectionId =>
+      requestApp(listener, 'POST', '/api/datasets/generate', {
+        documentId: 'doc_search',
+        connectionId,
+        count: 3,
+        declineShare: 34,
+      });
+    const quote = (passage, text) => [{ passage, quote: text }];
+    try {
+      assert.equal(openai.status, 201);
+      // Candidates for the pets question, in the order the check sees them: Passage 1 is the passage it was
+      // written from joined with the matching passage after it, then the other hits by rank.
+      rubricReply = {
+        results: [
+          {
+            question: 1,
+            points: [
+              { point: 1, quotes: quote(1, 'Pets are allowed in ground-floor rooms only'), needed: true },
+              { point: 2, quotes: quote(2, 'Pets must be on a lead in shared areas'), needed: true },
+              { point: 3, quotes: quote(3, 'owners pay for any damage caused'), needed: true },
+              { point: 4, quotes: quote(4, 'Pets may not be left alone in rooms'), needed: true },
+            ],
+          },
+          { question: 2, points: [{ point: 1, quotes: quote(1, 'Parking is valet only'), needed: true }] },
+        ],
+      };
+      const searched = await generate(openai.body.id);
+      assert.equal(searched.status, 201, JSON.stringify(searched.body));
+      assert.equal(searched.body.evidenceSearch, 'used', 'the draft records that the search ran');
+      const [pets, parking] = searched.body.cases;
+      assert.equal(pets.sourceEvidence, `${blocks[1]}\n${blocks[2]}`, 'Passage 1 is the written-from passage, merged');
+      assert.deepEqual(
+        pets.extraPassages,
+        [{ text: blocks[4] }, { text: blocks[6] }],
+        'only quoted candidates are kept, at most three passages',
+      );
+      assert.equal(parking.sourceEvidence, blocks[10], 'a question backed by its own passage keeps one passage');
+      assert.equal(parking.extraPassages, undefined);
+      const prompt = rubricPrompts.at(-1);
+      assert.match(prompt, /QUESTION 1: Can I bring pets\?/);
+      assert.ok(prompt.includes(`PASSAGE 1: ${blocks[1]}\n${blocks[2]}`), 'the check receives the merged Passage 1');
+      for (const [number, at] of [
+        [2, 4],
+        [3, 6],
+        [4, 8],
+        [5, 11],
+      ])
+        assert.ok(prompt.includes(`PASSAGE ${number}: ${blocks[at]}`), `candidate ${number} is passage ${at}`);
+      assert.doesNotMatch(prompt, /PREVIOUS PASSAGE|NEXT PASSAGE/);
+      // Cost cap: the check sees at most about 3,000 characters of candidate passages per question.
+      for (const question of prompt.split(/^QUESTION \d+: /m).slice(1)) {
+        const candidateText = [
+          ...question.matchAll(/^PASSAGE \d+: ([\s\S]*?)(?=\nPASSAGE \d+: |\n\n|\n<<<END |$(?![\s\S]))/gm),
+        ]
+          .map(match => match[1])
+          .join('');
+        assert.ok(candidateText.length > 0 && candidateText.length <= 3000, `${candidateText.length} characters`);
+      }
+      const petsCheck = searched.body.rubricCheck.cases.find(entry => entry.question === pets.question);
+      assert.deepEqual(
+        petsCheck.points.map(point => [point.supported, point.passages]),
+        [
+          [true, [1]],
+          [true, [2]],
+          [true, [3]],
+          [false, []],
+        ],
+        'a point quoted only from a passage dropped by the cap is not in the evidence',
+      );
+      assert.deepEqual(petsCheck.extraPassages, pets.extraPassages, 'the check is keyed by the kept passages');
+
+      // The search's embedding calls show on the Usage page under the draft; the passages go in one call.
+      assert.ok(
+        embeddingInputs.some(input => JSON.stringify(input) === JSON.stringify(blocks)),
+        'every passage of the source is embedded together',
+      );
+      const draftUsage = id =>
+        requestApp(listener, 'GET', '/api/usage').then(response =>
+          response.body.usage.filter(entry => entry.datasetId === id),
+        );
+      const firstUsage = await draftUsage(searched.body.id);
+      const searchUsage = firstUsage.find(entry => entry.step === 'Evidence search');
+      assert.equal(searchUsage?.model, 'text-embedding-3-small', 'the evidence search is its own step under the draft');
+      assert.equal(searchUsage.calls, 2, 'one call for the passages, one for the questions');
+      assert.ok(
+        firstUsage.some(entry => entry.step === 'Indexing'),
+        'a policy document without search vectors is indexed on its first draft',
+      );
+      const indexed = (await requestApp(listener, 'GET', '/api/state')).body.documents.find(
+        item => item.id === 'doc_search',
+      );
+      assert.equal(indexed.retrieval.status, 'ready', 'and its vectors are saved');
+
+      // "Should decline" questions keep their single nearby passage.
+      const decline = searched.body.cases.find(item => item.caseType === 'decline');
+      assert.equal(decline.sourceEvidence, blocks[0]);
+      assert.equal(decline.extraPassages, undefined);
+
+      const again = await generate(openai.body.id);
+      assert.equal(again.status, 201);
+      assert.equal(
+        (await draftUsage(again.body.id)).some(entry => entry.step === 'Indexing'),
+        false,
+        'a document is indexed once',
+      );
+
+      // Saving and Re-check rubric keep the searched evidence and the marker, and never search again.
+      const savedSearch = await requestApp(listener, 'PUT', `/api/datasets/${searched.body.id}`, {
+        cases: searched.body.cases,
+      });
+      assert.equal(savedSearch.status, 200);
+      assert.equal(savedSearch.body.evidenceSearch, 'used', 'saving keeps the marker');
+      assert.equal(savedSearch.body.rubricCheck.cases.length, 2, 'an unchanged question keeps its check after saving');
+      const embeddingsBefore = embeddingInputs.length;
+      const rechecked = await requestApp(listener, 'POST', `/api/datasets/${searched.body.id}/recheck-rubric`);
+      assert.equal(rechecked.status, 200);
+      assert.equal(rechecked.body.evidenceSearch, 'used', 'a re-check keeps the marker');
+      assert.equal(embeddingInputs.length, embeddingsBefore, 'Re-check rubric makes no search call');
+      assert.ok(
+        rubricPrompts.at(-1).includes('QUESTION 2: Where do I park?') &&
+          rubricPrompts.at(-1).includes(`PASSAGE 1: ${blocks[10]}`),
+        'a searched question that kept only Passage 1 is re-checked over its passage list',
+      );
+      assert.doesNotMatch(rubricPrompts.at(-1), /EVIDENCE: |PREVIOUS PASSAGE/);
+      assert.deepEqual(
+        rechecked.body.rubricCheck.cases.map(entry => entry.points.map(point => point.supported)),
+        [[true, true, true, false], [true]],
+      );
+
+      // A website question can draw passages from other pages of its snapshot, each with its own page link.
+      const siteSearchStore = JSON.parse(readFileSync(testStorePath, 'utf8'));
+      siteSearchStore.websiteSnapshots.push({
+        id: 'site_search',
+        websiteId: 'site_search_web',
+        kind: 'website',
+        name: 'hotel-search.example',
+        status: 'complete',
+        pages: [
+          { id: 's1', url: 'https://hotel-search.example/rooms', text: 'Pets are allowed in ground-floor rooms only.' },
+          { id: 's2', url: 'https://hotel-search.example/rules', text: 'Pets must be on a lead in shared areas.' },
+          { id: 's3', url: 'https://hotel-search.example/parking', text: 'Parking is valet only.' },
+        ],
+      });
+      writeFileSync(testStorePath, JSON.stringify(siteSearchStore));
+      websiteQuestions = [
+        {
+          question: 'Can I bring pets?',
+          expectedAnswer: 'Pets stay in ground-floor rooms, on a lead.',
+          requiredPoints: ['Ground-floor rooms only', 'On a lead in shared areas'],
+          forbiddenPoints: [],
+          sourceIndex: 1,
+        },
+      ];
+      rubricReply = {
+        results: [
+          {
+            question: 1,
+            points: [
+              { point: 1, quotes: quote(1, 'Pets are allowed in ground-floor rooms only'), needed: true },
+              { point: 2, quotes: quote(2, 'Pets must be on a lead in shared areas'), needed: true },
+            ],
+          },
+        ],
+      };
+      const siteDraft = await requestApp(listener, 'POST', '/api/datasets/generate', {
+        documentId: 'site_search',
+        connectionId: openai.body.id,
+        count: 1,
+        declineShare: 0,
+      });
+      assert.equal(siteDraft.status, 201, JSON.stringify(siteDraft.body));
+      assert.deepEqual(
+        [siteDraft.body.cases[0].sourceUrl, siteDraft.body.cases[0].extraPassages],
+        [
+          'https://hotel-search.example/rooms',
+          [{ text: 'Pets must be on a lead in shared areas.', sourceUrl: 'https://hotel-search.example/rules' }],
+        ],
+        'a website passage from another page keeps its own page link',
+      );
+
+      // A draft claims the search only when it ran for every written question. When the rubric check that chooses
+      // the candidates fails, or the questions cannot be embedded, the draft is generated as before and says so.
+      const plainReply = {
+        results: [
+          {
+            question: 1,
+            points: [1, 2, 3, 4].map(point => ({
+              point,
+              quotes: ['Pets are allowed in ground-floor rooms only'],
+              needed: true,
+            })),
+          },
+          { question: 2, points: [{ point: 1, quotes: ['Parking is valet only'], needed: true }] },
+        ],
+      };
+      const singlePassages = draft =>
+        draft.body.cases
+          .filter(item => item.caseType !== 'decline')
+          .map(item => [item.sourceEvidence, item.extraPassages]);
+      const asToday = `PREVIOUS PASSAGE: ${blocks[0]}
+EVIDENCE: ${blocks[1]}
+NEXT PASSAGE: ${blocks[2]}`;
+      rubricReply = plainReply;
+      failNextRubricCheck = true;
+      const checkFailed = await generate(openai.body.id);
+      assert.equal(checkFailed.status, 201, JSON.stringify(checkFailed.body));
+      assert.equal(checkFailed.body.evidenceSearch, 'unavailable', 'a failed check during the search is not a search');
+      assert.deepEqual(
+        singlePassages(checkFailed),
+        [
+          [blocks[1], undefined],
+          [blocks[10], undefined],
+        ],
+        'each question keeps the single passage it was written from, not the merged one',
+      );
+      assert.ok(rubricPrompts.at(-1).includes(asToday), 'the rubric check runs again as today');
+      assert.equal(checkFailed.body.rubricCheck.cases?.length, 2, 'and its results are kept');
+
+      failQueryEmbedding = true;
+      const queryFailed = await generate(openai.body.id);
+      failQueryEmbedding = false;
+      assert.equal(queryFailed.status, 201, JSON.stringify(queryFailed.body));
+      assert.equal(
+        queryFailed.body.evidenceSearch,
+        'unavailable',
+        'questions that cannot be embedded are not searched',
+      );
+      assert.deepEqual(singlePassages(queryFailed), [
+        [blocks[1], undefined],
+        [blocks[10], undefined],
+      ]);
+      assert.ok(rubricPrompts.at(-1).includes(asToday));
+
+      // Fallback: when the passages cannot be embedded, the draft is generated as before and says so.
+      failEmbeddings = true;
+      const failed = await generate(openai.body.id);
+      assert.equal(failed.status, 201);
+      assert.equal(failed.body.evidenceSearch, 'unavailable');
+      assert.deepEqual(
+        failed.body.cases
+          .filter(item => item.caseType !== 'decline')
+          .map(item => [item.sourceEvidence, item.extraPassages]),
+        [
+          [blocks[1], undefined],
+          [blocks[10], undefined],
+        ],
+        'one passage per question, as today',
+      );
+      assert.ok(
+        rubricPrompts
+          .at(-1)
+          .includes(`PREVIOUS PASSAGE: ${blocks[0]}\nEVIDENCE: ${blocks[1]}\nNEXT PASSAGE: ${blocks[2]}`),
+        'the rubric check runs as today',
+      );
+      const failedSaved = await requestApp(listener, 'PUT', `/api/datasets/${failed.body.id}`, {
+        cases: failed.body.cases,
+      });
+      assert.equal(failedSaved.body.evidenceSearch, 'unavailable', 'saving keeps the unavailable marker');
+      const failedRechecked = await requestApp(listener, 'POST', `/api/datasets/${failed.body.id}/recheck-rubric`);
+      assert.equal(failedRechecked.body.evidenceSearch, 'unavailable', 'a re-check keeps the unavailable marker');
+      failEmbeddings = false;
+
+      // Without an OpenAI connection for embeddings there is no search either.
+      assert.equal((await requestApp(listener, 'DELETE', `/api/connections/${openai.body.id}`)).status, 204);
+      const unconnected = await generate(control.body.id);
+      assert.equal(unconnected.status, 201);
+      assert.equal(unconnected.body.evidenceSearch, 'unavailable');
+      assert.equal(unconnected.body.cases[0].extraPassages, undefined);
+    } finally {
+      globalThis.fetch = searchFetch;
+      await requestApp(listener, 'DELETE', `/api/connections/${openai.body.id}`);
+    }
+  }
   await requestApp(listener, 'POST', '/api/flexagent/select-agent', { agentId: '65f000000000000000000004' });
   assert.equal((await requestApp(listener, 'DELETE', `/api/documents/${scopedDocument.body.id}`)).status, 400);
   assert.equal(
